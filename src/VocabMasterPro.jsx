@@ -1149,20 +1149,21 @@ export default function VocabMasterPro() {
     const [score, setScore] = useState(0);
     const [quizDone, setQuizDone] = useState(false);
     const [spellingInput, setSpellingInput] = useState("");
+    const [quizResults, setQuizResults] = useState([]); // Track results for SRS update
     const spellingRef = useRef(null);
-    const processingRef = useRef(false); // Prevent double execution
+    const processingRef = useRef(false);
 
     const generateQuiz = (type) => {
       setQuizType(type);
       const pool = shuffleArray(words);
       const qs = [];
       const count = Math.min(10, pool.length);
-      
+
       for (let i = 0; i < count; i++) {
         const word = pool[i];
         const others = pool.filter((_, j) => j !== i);
         const distractors = shuffleArray(others).slice(0, 3);
-        
+
         if (type === "mc") {
           const options = shuffleArray([
             { text: word.definition, correct: true },
@@ -1194,28 +1195,22 @@ export default function VocabMasterPro() {
           if (qs.length >= 5) break;
         }
       }
-      
+
       setQuestions(qs);
       setQIdx(0);
       setSelected(null);
       setAnswered(false);
       setScore(0);
       setQuizDone(false);
+      setQuizResults([]);
     };
 
     const checkAnswer = (answer) => {
-      // Prevent double execution
-      if (answered || processingRef.current) {
-        console.log("⚠️ Blocked duplicate call");
-        return;
-      }
+      if (answered || processingRef.current) return;
 
       processingRef.current = true;
-      console.log("✅ checkAnswer called", { answer, answered });
-
       setSelected(answer);
       setAnswered(true);
-      console.log("✅ answered set to true");
 
       const q = questions[qIdx];
       let correct = false;
@@ -1226,22 +1221,14 @@ export default function VocabMasterPro() {
         correct = answer.toLowerCase().trim() === q.word.term.toLowerCase();
       }
 
-      console.log("✅ Correct?", correct, "Word ID:", q.word?.id);
+      if (correct) setScore(s => s + 1);
 
-      try {
-        if (correct) {
-          setScore(s => s + 1);
-          if (q.word?.id || q.words?.[0]?.id) {
-            updateWordSRS(q.word?.id || q.words?.[0]?.id, "good");
-          }
-        } else if (q.word?.id) {
-          updateWordSRS(q.word.id, "again");
-        }
-      } catch (error) {
-        console.error("❌ Error updating SRS:", error);
-      }
-
-      console.log("✅ checkAnswer completed");
+      // Store result for batch SRS update later
+      setQuizResults(prev => [...prev, {
+        wordId: q.word?.id,
+        correct,
+        rating: correct ? "good" : "again"
+      }]);
 
       // Scroll to show Continue button
       setTimeout(() => {
@@ -1250,11 +1237,16 @@ export default function VocabMasterPro() {
     };
 
     const nextQuestion = () => {
-      console.log("🔄 nextQuestion called");
-      processingRef.current = false; // Reset for next question
+      processingRef.current = false;
 
       if (qIdx + 1 >= questions.length) {
-        console.log("🏁 Quiz complete!");
+        // Batch update SRS for all answered questions
+        quizResults.forEach(result => {
+          if (result.wordId) {
+            updateWordSRS(result.wordId, result.rating);
+          }
+        });
+
         setQuizDone(true);
         const total = questions.length;
         if (score + (answered && selected?.correct ? 1 : 0) === total) {
@@ -1262,7 +1254,6 @@ export default function VocabMasterPro() {
         }
         setStats(p => ({ ...p, totalQuizzes: (p.totalQuizzes || 0) + 1 }));
       } else {
-        console.log("➡️ Moving to next question");
         setQIdx(q => q + 1);
         setSelected(null);
         setAnswered(false);
@@ -1474,8 +1465,23 @@ export default function VocabMasterPro() {
 
         {/* Matching */}
         {q.type === "match" && <MatchingQuiz question={q} answered={answered} onAnswer={(correct) => {
+          if (processingRef.current) return;
+          processingRef.current = true;
           setAnswered(true);
           if (correct) setScore(s => s + 1);
+
+          // Store matching results for batch SRS update
+          q.words.forEach(word => {
+            setQuizResults(prev => [...prev, {
+              wordId: word.id,
+              correct,
+              rating: correct ? "good" : "again"
+            }]);
+          });
+
+          setTimeout(() => {
+            window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
+          }, 100);
         }} />}
 
         {answered && (
