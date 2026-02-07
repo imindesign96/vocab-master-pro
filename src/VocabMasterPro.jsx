@@ -1,0 +1,1905 @@
+import { useState, useEffect, useCallback, useRef, useMemo } from "react";
+
+// ═══════════════════════════════════════════════════════════════
+// 🧠 VOCABMASTER PRO — Ultimate English Learning App
+// ═══════════════════════════════════════════════════════════════
+// Methods: SM-2 SRS, Active Recall, Leitner Box, Interleaving,
+//          Retrieval Practice, Dual Coding, Context Learning
+// ═══════════════════════════════════════════════════════════════
+
+// ── CONSTANTS & THEME ──────────────────────────────────────────
+const THEME = {
+  bg: "#0a0a0f",
+  surface: "#12121a",
+  card: "#1a1a28",
+  cardHover: "#222236",
+  accent: "#6c5ce7",
+  accentLight: "#a29bfe",
+  accentGlow: "rgba(108,92,231,0.3)",
+  success: "#00b894",
+  successGlow: "rgba(0,184,148,0.3)",
+  danger: "#e17055",
+  dangerGlow: "rgba(225,112,85,0.3)",
+  warning: "#fdcb6e",
+  warningGlow: "rgba(253,203,110,0.3)",
+  info: "#74b9ff",
+  text: "#e8e8f0",
+  textSecondary: "#8888a8",
+  textMuted: "#555570",
+  border: "#2a2a40",
+  gradient1: "linear-gradient(135deg, #6c5ce7, #a29bfe)",
+  gradient2: "linear-gradient(135deg, #00b894, #55efc4)",
+  gradient3: "linear-gradient(135deg, #e17055, #fab1a0)",
+  gradient4: "linear-gradient(135deg, #fdcb6e, #ffeaa7)",
+};
+
+const MASTERY = [
+  { level: 0, name: "New", color: "#636e72", icon: "🌱", minReviews: 0 },
+  { level: 1, name: "Learning", color: "#e17055", icon: "📖", minReviews: 1 },
+  { level: 2, name: "Familiar", color: "#fdcb6e", icon: "💡", minReviews: 3 },
+  { level: 3, name: "Known", color: "#74b9ff", icon: "🎯", minReviews: 6 },
+  { level: 4, name: "Mastered", color: "#00b894", icon: "👑", minReviews: 10 },
+];
+
+const CATEGORIES = [
+  { id: "toeic", name: "TOEIC", icon: "📋", color: "#6c5ce7" },
+  { id: "ielts", name: "IELTS", icon: "🎓", color: "#00b894" },
+  { id: "business", name: "Business", icon: "💼", color: "#e17055" },
+  { id: "tech", name: "Technology", icon: "💻", color: "#74b9ff" },
+  { id: "daily", name: "Daily Life", icon: "🏠", color: "#fdcb6e" },
+  { id: "academic", name: "Academic", icon: "📚", color: "#a29bfe" },
+  { id: "travel", name: "Travel", icon: "✈️", color: "#55efc4" },
+  { id: "custom", name: "Custom", icon: "⭐", color: "#fd79a8" },
+];
+
+const ACHIEVEMENTS = [
+  { id: "first_word", name: "First Step", desc: "Learn your first word", icon: "🌟", condition: (s) => s.totalWords >= 1 },
+  { id: "ten_streak", name: "On Fire", desc: "10-day streak", icon: "🔥", condition: (s) => s.streak >= 10 },
+  { id: "hundred_words", name: "Centurion", desc: "Learn 100 words", icon: "💯", condition: (s) => s.totalWords >= 100 },
+  { id: "quiz_master", name: "Quiz Master", desc: "Complete 50 quizzes", icon: "🏆", condition: (s) => s.totalQuizzes >= 50 },
+  { id: "perfect_score", name: "Perfectionist", desc: "100% in a quiz", icon: "✨", condition: (s) => s.perfectQuizzes >= 1 },
+  { id: "night_owl", name: "Night Owl", desc: "Study after midnight", icon: "🦉", condition: (s) => s.nightStudy },
+  { id: "speed_demon", name: "Speed Demon", desc: "Review 20 words in 2min", icon: "⚡", condition: (s) => s.speedReview },
+  { id: "polyglot", name: "Word Collector", desc: "Learn 500 words", icon: "📖", condition: (s) => s.totalWords >= 500 },
+];
+
+// ── SM-2 SPACED REPETITION ENGINE ─────────────────────────────
+const SRSEngine = {
+  processReview(word, quality) {
+    // quality: 0-5 (0=blackout, 5=perfect)
+    let { easeFactor = 2.5, interval = 0, repetitions = 0 } = word.srs || {};
+    
+    if (quality >= 3) {
+      if (repetitions === 0) interval = 1;
+      else if (repetitions === 1) interval = 6;
+      else interval = Math.round(interval * easeFactor);
+      repetitions++;
+    } else {
+      repetitions = 0;
+      interval = 1;
+    }
+    
+    easeFactor = Math.max(1.3, easeFactor + (0.1 - (5 - quality) * (0.08 + (5 - quality) * 0.02)));
+    
+    const nextReview = new Date();
+    nextReview.setDate(nextReview.getDate() + interval);
+    
+    return {
+      ...word.srs,
+      easeFactor,
+      interval,
+      repetitions,
+      nextReview: nextReview.toISOString(),
+      lastReview: new Date().toISOString(),
+      totalReviews: (word.srs?.totalReviews || 0) + 1,
+    };
+  },
+
+  getLeitnerBox(word) {
+    const reps = word.srs?.repetitions || 0;
+    if (reps === 0) return 0;
+    if (reps <= 2) return 1;
+    if (reps <= 5) return 2;
+    if (reps <= 9) return 3;
+    return 4;
+  },
+
+  getMasteryLevel(word) {
+    const reviews = word.srs?.totalReviews || 0;
+    for (let i = MASTERY.length - 1; i >= 0; i--) {
+      if (reviews >= MASTERY[i].minReviews) return i;
+    }
+    return 0;
+  },
+
+  isDueForReview(word) {
+    if (!word.srs?.nextReview) return true;
+    return new Date(word.srs.nextReview) <= new Date();
+  },
+
+  qualityFromRating(rating) {
+    switch (rating) {
+      case "again": return 1;
+      case "hard": return 3;
+      case "good": return 4;
+      case "easy": return 5;
+      default: return 3;
+    }
+  },
+};
+
+// ── SAMPLE VOCABULARY DATA ────────────────────────────────────
+const SAMPLE_WORDS = [
+  { id: "w1", term: "ubiquitous", definition: "Present, appearing, or found everywhere", phonetic: "/juːˈbɪkwɪtəs/", partOfSpeech: "adj", examples: ["Smartphones are ubiquitous in modern society", "Coffee shops have become ubiquitous in urban areas"], synonyms: ["omnipresent", "pervasive", "universal"], category: "academic", srs: {} },
+  { id: "w2", term: "resilience", definition: "The capacity to recover quickly from difficulties", phonetic: "/rɪˈzɪliəns/", partOfSpeech: "n", examples: ["The team showed great resilience after the setback", "Building resilience is key to mental health"], synonyms: ["toughness", "adaptability", "grit"], category: "business", srs: {} },
+  { id: "w3", term: "elaborate", definition: "To develop or present in detail; involving many carefully arranged parts", phonetic: "/ɪˈlæbərət/", partOfSpeech: "v/adj", examples: ["Could you elaborate on your proposal?", "They prepared an elaborate dinner for the guests"], synonyms: ["detailed", "intricate", "expand"], category: "ielts", srs: {} },
+  { id: "w4", term: "mitigate", definition: "To make something less severe, serious, or painful", phonetic: "/ˈmɪtɪɡeɪt/", partOfSpeech: "v", examples: ["We need to mitigate the risks of the project", "Trees help mitigate the effects of air pollution"], synonyms: ["alleviate", "reduce", "lessen"], category: "toeic", srs: {} },
+  { id: "w5", term: "scalability", definition: "The ability of a system to handle growing amounts of work", phonetic: "/ˌskeɪləˈbɪlɪti/", partOfSpeech: "n", examples: ["Cloud computing offers excellent scalability", "We must ensure scalability before launch"], synonyms: ["expandability", "flexibility"], category: "tech", srs: {} },
+  { id: "w6", term: "ambiguous", definition: "Open to more than one interpretation; not clear", phonetic: "/æmˈbɪɡjuəs/", partOfSpeech: "adj", examples: ["The contract language was ambiguous", "His response was deliberately ambiguous"], synonyms: ["vague", "unclear", "equivocal"], category: "ielts", srs: {} },
+  { id: "w7", term: "leverage", definition: "To use something to maximum advantage", phonetic: "/ˈlevərɪdʒ/", partOfSpeech: "v/n", examples: ["We should leverage our existing partnerships", "Use your experience as leverage in negotiations"], synonyms: ["utilize", "exploit", "capitalize"], category: "business", srs: {} },
+  { id: "w8", term: "consensus", definition: "A general agreement among a group", phonetic: "/kənˈsensəs/", partOfSpeech: "n", examples: ["The committee reached a consensus on the budget", "Building consensus takes time and patience"], synonyms: ["agreement", "accord", "unanimity"], category: "toeic", srs: {} },
+  { id: "w9", term: "latency", definition: "The delay before a transfer of data begins", phonetic: "/ˈleɪtənsi/", partOfSpeech: "n", examples: ["Low latency is crucial for real-time applications", "We reduced latency by 50% with the new CDN"], synonyms: ["delay", "lag", "response time"], category: "tech", srs: {} },
+  { id: "w10", term: "pragmatic", definition: "Dealing with things in a practical rather than theoretical way", phonetic: "/præɡˈmætɪk/", partOfSpeech: "adj", examples: ["She took a pragmatic approach to problem-solving", "We need pragmatic solutions, not idealistic ones"], synonyms: ["practical", "realistic", "sensible"], category: "academic", srs: {} },
+  { id: "w11", term: "itinerary", definition: "A planned route or journey; a travel schedule", phonetic: "/aɪˈtɪnəreri/", partOfSpeech: "n", examples: ["Please check the itinerary for tomorrow's trip", "I'll send you the detailed itinerary by email"], synonyms: ["schedule", "plan", "route"], category: "travel", srs: {} },
+  { id: "w12", term: "concurrent", definition: "Existing, happening, or done at the same time", phonetic: "/kənˈkʌrənt/", partOfSpeech: "adj", examples: ["The system handles concurrent requests efficiently", "She managed concurrent projects successfully"], synonyms: ["simultaneous", "parallel", "synchronous"], category: "tech", srs: {} },
+  { id: "w13", term: "deteriorate", definition: "To become progressively worse", phonetic: "/dɪˈtɪəriəreɪt/", partOfSpeech: "v", examples: ["The building's condition continued to deteriorate", "Relations between the two countries deteriorated"], synonyms: ["decline", "worsen", "degrade"], category: "ielts", srs: {} },
+  { id: "w14", term: "provisional", definition: "Arranged or existing for the present, possibly to be changed later", phonetic: "/prəˈvɪʒənəl/", partOfSpeech: "adj", examples: ["They reached a provisional agreement", "This is a provisional schedule, subject to change"], synonyms: ["temporary", "interim", "tentative"], category: "business", srs: {} },
+  { id: "w15", term: "commute", definition: "To travel regularly between home and work", phonetic: "/kəˈmjuːt/", partOfSpeech: "v/n", examples: ["I commute 45 minutes to work every day", "The long commute was exhausting"], synonyms: ["travel", "journey"], category: "daily", srs: {} },
+  { id: "w16", term: "throughput", definition: "The amount of material or items passing through a system", phonetic: "/ˈθruːpʊt/", partOfSpeech: "n", examples: ["We need to increase server throughput", "Factory throughput doubled after automation"], synonyms: ["output", "productivity", "capacity"], category: "tech", srs: {} },
+  { id: "w17", term: "feasible", definition: "Possible and practical to do or achieve", phonetic: "/ˈfiːzəbəl/", partOfSpeech: "adj", examples: ["Is this plan feasible within our budget?", "We conducted a feasible study before starting"], synonyms: ["achievable", "viable", "doable"], category: "toeic", srs: {} },
+  { id: "w18", term: "meticulous", definition: "Showing great attention to detail; very careful", phonetic: "/mɪˈtɪkjələs/", partOfSpeech: "adj", examples: ["She is meticulous in her research methodology", "The meticulous planning paid off"], synonyms: ["thorough", "precise", "diligent"], category: "academic", srs: {} },
+  { id: "w19", term: "accommodate", definition: "To provide lodging or room for; to adjust to", phonetic: "/əˈkɒmədeɪt/", partOfSpeech: "v", examples: ["The hotel can accommodate 200 guests", "We'll accommodate your schedule"], synonyms: ["house", "adapt", "adjust"], category: "travel", srs: {} },
+  { id: "w20", term: "benchmark", definition: "A standard or point of reference for evaluation", phonetic: "/ˈbentʃmɑːrk/", partOfSpeech: "n/v", examples: ["Industry benchmarks show we're above average", "We need to benchmark our performance"], synonyms: ["standard", "reference", "criterion"], category: "business", srs: {} },
+];
+
+// ── HELPER FUNCTIONS ──────────────────────────────────────────
+const shuffleArray = (arr) => {
+  const a = [...arr];
+  for (let i = a.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [a[i], a[j]] = [a[j], a[i]];
+  }
+  return a;
+};
+
+const speak = (text, rate = 0.85) => {
+  if ("speechSynthesis" in window) {
+    window.speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = "en-US";
+    u.rate = rate;
+    u.pitch = 1;
+    window.speechSynthesis.speak(u);
+  }
+};
+
+const formatDate = (iso) => {
+  if (!iso) return "Never";
+  const d = new Date(iso);
+  const now = new Date();
+  const diff = Math.floor((d - now) / (1000 * 60 * 60 * 24));
+  if (diff === 0) return "Today";
+  if (diff === 1) return "Tomorrow";
+  if (diff < 0) return "Overdue";
+  return `In ${diff} days`;
+};
+
+// ── CSS STYLES (injected) ─────────────────────────────────────
+const injectStyles = () => {
+  if (document.getElementById("vm-styles")) return;
+  const style = document.createElement("style");
+  style.id = "vm-styles";
+  style.textContent = `
+    @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500;600&display=swap');
+    
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    
+    @keyframes vmFadeIn { from { opacity:0; transform:translateY(12px) } to { opacity:1; transform:translateY(0) } }
+    @keyframes vmSlideUp { from { opacity:0; transform:translateY(40px) } to { opacity:1; transform:translateY(0) } }
+    @keyframes vmScaleIn { from { opacity:0; transform:scale(0.9) } to { opacity:1; transform:scale(1) } }
+    @keyframes vmPulse { 0%,100% { transform:scale(1) } 50% { transform:scale(1.05) } }
+    @keyframes vmShake { 0%,100% { transform:translateX(0) } 25% { transform:translateX(-8px) } 75% { transform:translateX(8px) } }
+    @keyframes vmGlow { 0%,100% { box-shadow:0 0 20px rgba(108,92,231,0.2) } 50% { box-shadow:0 0 40px rgba(108,92,231,0.4) } }
+    @keyframes vmFloat { 0%,100% { transform:translateY(0) } 50% { transform:translateY(-6px) } }
+    @keyframes vmConfetti { 0% { transform:translateY(0) rotate(0deg); opacity:1 } 100% { transform:translateY(-200px) rotate(720deg); opacity:0 } }
+    @keyframes vmFlip { 0% { transform:rotateY(0deg) } 50% { transform:rotateY(90deg) } 100% { transform:rotateY(0deg) } }
+    @keyframes vmProgress { from { width:0 } }
+    @keyframes vmStreakFire { 0%,100% { transform:scale(1) rotate(-3deg) } 50% { transform:scale(1.2) rotate(3deg) } }
+    @keyframes vmRipple { to { transform:scale(4); opacity:0 } }
+    @keyframes vmGradientShift { 0% { background-position:0% 50% } 50% { background-position:100% 50% } 100% { background-position:0% 50% } }
+    @keyframes vmBounceIn { 0% { transform:scale(0.3); opacity:0 } 50% { transform:scale(1.05) } 70% { transform:scale(0.95) } 100% { transform:scale(1); opacity:1 } }
+    
+    .vm-app {
+      font-family: 'Outfit', sans-serif;
+      background: ${THEME.bg};
+      color: ${THEME.text};
+      min-height: 100vh;
+      overflow-x: hidden;
+    }
+    
+    .vm-app::-webkit-scrollbar { width: 6px; }
+    .vm-app::-webkit-scrollbar-track { background: transparent; }
+    .vm-app::-webkit-scrollbar-thumb { background: ${THEME.border}; border-radius: 3px; }
+    
+    .vm-mono { font-family: 'JetBrains Mono', monospace; }
+    
+    .vm-glass {
+      background: rgba(26,26,40,0.7);
+      backdrop-filter: blur(20px);
+      -webkit-backdrop-filter: blur(20px);
+      border: 1px solid rgba(255,255,255,0.06);
+    }
+    
+    .vm-btn {
+      cursor: pointer;
+      border: none;
+      font-family: 'Outfit', sans-serif;
+      font-weight: 600;
+      transition: all 0.2s ease;
+      position: relative;
+      overflow: hidden;
+    }
+    .vm-btn:active { transform: scale(0.96); }
+    
+    .vm-card {
+      background: ${THEME.card};
+      border: 1px solid ${THEME.border};
+      border-radius: 16px;
+      transition: all 0.3s ease;
+    }
+    .vm-card:hover { border-color: rgba(108,92,231,0.3); }
+    
+    .vm-input {
+      font-family: 'Outfit', sans-serif;
+      background: ${THEME.surface};
+      border: 1.5px solid ${THEME.border};
+      color: ${THEME.text};
+      border-radius: 12px;
+      padding: 12px 16px;
+      font-size: 15px;
+      width: 100%;
+      transition: all 0.2s ease;
+      outline: none;
+    }
+    .vm-input:focus { border-color: ${THEME.accent}; box-shadow: 0 0 0 3px ${THEME.accentGlow}; }
+    .vm-input::placeholder { color: ${THEME.textMuted}; }
+    
+    .vm-tag {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 4px 10px;
+      border-radius: 20px;
+      font-size: 12px;
+      font-weight: 600;
+    }
+    
+    .vm-tooltip { position: relative; }
+    .vm-tooltip::after {
+      content: attr(data-tip);
+      position: absolute;
+      bottom: 100%;
+      left: 50%;
+      transform: translateX(-50%) translateY(-4px);
+      background: ${THEME.card};
+      border: 1px solid ${THEME.border};
+      color: ${THEME.text};
+      padding: 6px 12px;
+      border-radius: 8px;
+      font-size: 12px;
+      white-space: nowrap;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.2s;
+    }
+    .vm-tooltip:hover::after { opacity: 1; }
+    
+    .vm-nav-item {
+      cursor: pointer;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 4px;
+      padding: 8px 12px;
+      border-radius: 12px;
+      transition: all 0.2s ease;
+      font-size: 11px;
+      font-weight: 500;
+      color: ${THEME.textMuted};
+      min-width: 64px;
+    }
+    .vm-nav-item:hover { color: ${THEME.textSecondary}; }
+    .vm-nav-item.active { color: ${THEME.accent}; background: rgba(108,92,231,0.1); }
+    .vm-nav-item .nav-icon { font-size: 22px; }
+    
+    .vm-streak-badge {
+      animation: vmStreakFire 1.5s ease-in-out infinite;
+      display: inline-block;
+    }
+    
+    .vm-progress-ring {
+      transform: rotate(-90deg);
+    }
+    
+    .vm-flashcard {
+      perspective: 1000px;
+      cursor: pointer;
+    }
+    .vm-flashcard-inner {
+      transition: transform 0.6s ease;
+      transform-style: preserve-3d;
+    }
+    .vm-flashcard-inner.flipped { transform: rotateY(180deg); }
+    .vm-flashcard-front, .vm-flashcard-back {
+      backface-visibility: hidden;
+      -webkit-backface-visibility: hidden;
+    }
+    .vm-flashcard-back { transform: rotateY(180deg); }
+  `;
+  document.head.appendChild(style);
+};
+
+// ── REUSABLE COMPONENTS ───────────────────────────────────────
+const ProgressRing = ({ progress, size = 60, stroke = 5, color = THEME.accent }) => {
+  const r = (size - stroke) / 2;
+  const c = 2 * Math.PI * r;
+  const offset = c - (Math.min(progress, 1) * c);
+  return (
+    <svg width={size} height={size} className="vm-progress-ring">
+      <circle cx={size/2} cy={size/2} r={r} fill="none" stroke={THEME.border} strokeWidth={stroke} />
+      <circle cx={size/2} cy={size/2} r={r} fill="none" stroke={color} strokeWidth={stroke}
+        strokeDasharray={c} strokeDashoffset={offset} strokeLinecap="round"
+        style={{ transition: "stroke-dashoffset 0.8s ease" }} />
+    </svg>
+  );
+};
+
+const StatCard = ({ icon, label, value, color = THEME.accent, sub }) => (
+  <div className="vm-card" style={{ padding: "16px", display: "flex", alignItems: "center", gap: 14 }}>
+    <div style={{
+      width: 44, height: 44, borderRadius: 12,
+      background: `${color}18`, display: "flex", alignItems: "center", justifyContent: "center",
+      fontSize: 22, flexShrink: 0
+    }}>{icon}</div>
+    <div style={{ flex: 1, minWidth: 0 }}>
+      <div style={{ fontSize: 12, color: THEME.textSecondary, fontWeight: 500 }}>{label}</div>
+      <div style={{ fontSize: 22, fontWeight: 800, color }}>{value}</div>
+      {sub && <div style={{ fontSize: 11, color: THEME.textMuted }}>{sub}</div>}
+    </div>
+  </div>
+);
+
+const RatingButtons = ({ onRate, showEasy = true }) => (
+  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+    {[
+      { key: "again", label: "Again", icon: "✕", color: THEME.danger, bg: THEME.dangerGlow, sub: "< 1d" },
+      { key: "hard", label: "Hard", icon: "⚡", color: THEME.warning, bg: THEME.warningGlow, sub: "1-2d" },
+      { key: "good", label: "Good", icon: "✓", color: THEME.success, bg: THEME.successGlow, sub: "3-7d" },
+      ...(showEasy ? [{ key: "easy", label: "Easy", icon: "★", color: THEME.info, bg: "rgba(116,185,255,0.3)", sub: "7d+" }] : []),
+    ].map(({ key, label, icon, color, bg, sub }) => (
+      <button key={key} className="vm-btn" onClick={() => onRate(key)} style={{
+        flex: 1, minWidth: 70, padding: "14px 8px", borderRadius: 14,
+        background: bg, color, fontSize: 14, display: "flex", flexDirection: "column",
+        alignItems: "center", gap: 4, border: `1.5px solid ${color}30`,
+      }}>
+        <span style={{ fontSize: 20 }}>{icon}</span>
+        <span style={{ fontWeight: 700 }}>{label}</span>
+        <span style={{ fontSize: 10, opacity: 0.7 }}>{sub}</span>
+      </button>
+    ))}
+  </div>
+);
+
+const WordCard = ({ word, showDef, onFlip, compact }) => {
+  const mastery = SRSEngine.getMasteryLevel(word);
+  const m = MASTERY[mastery];
+  return (
+    <div className="vm-card" onClick={onFlip} style={{
+      padding: compact ? 16 : 28, cursor: onFlip ? "pointer" : "default",
+      position: "relative", overflow: "hidden",
+      animation: "vmScaleIn 0.3s ease",
+    }}>
+      <div style={{
+        position: "absolute", top: 0, left: 0, right: 0, height: 3,
+        background: m.color, opacity: 0.6,
+      }} />
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+        <span className="vm-tag" style={{ background: `${m.color}20`, color: m.color }}>
+          {m.icon} {m.name}
+        </span>
+        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+          <span className="vm-tag" style={{ background: `${THEME.accent}15`, color: THEME.accentLight, fontSize: 11 }}>
+            {word.partOfSpeech}
+          </span>
+          <button className="vm-btn" onClick={(e) => { e.stopPropagation(); speak(word.term); }}
+            style={{ background: "none", color: THEME.accentLight, fontSize: 18, padding: 4 }}>
+            🔊
+          </button>
+        </div>
+      </div>
+      
+      <div style={{ fontSize: compact ? 24 : 32, fontWeight: 800, marginBottom: 4, letterSpacing: "-0.5px" }}>
+        {word.term}
+      </div>
+      <div className="vm-mono" style={{ fontSize: 13, color: THEME.textMuted, marginBottom: showDef ? 16 : 0 }}>
+        {word.phonetic}
+      </div>
+      
+      {showDef && (
+        <div style={{ animation: "vmFadeIn 0.4s ease" }}>
+          <div style={{
+            padding: 16, borderRadius: 12, background: `${THEME.accent}08`,
+            border: `1px solid ${THEME.accent}15`, marginBottom: 14,
+          }}>
+            <div style={{ fontSize: 17, fontWeight: 500, lineHeight: 1.5 }}>{word.definition}</div>
+          </div>
+          
+          {word.examples?.length > 0 && (
+            <div style={{ marginBottom: 12 }}>
+              <div style={{ fontSize: 11, fontWeight: 700, color: THEME.textMuted, marginBottom: 8, textTransform: "uppercase", letterSpacing: 1 }}>
+                Examples
+              </div>
+              {word.examples.map((ex, i) => (
+                <div key={i} style={{
+                  padding: "10px 14px", borderRadius: 10, marginBottom: 6,
+                  background: THEME.surface, borderLeft: `3px solid ${THEME.accent}40`,
+                  fontSize: 14, color: THEME.textSecondary, lineHeight: 1.5, fontStyle: "italic",
+                }}>"{ex}"</div>
+              ))}
+            </div>
+          )}
+          
+          {word.synonyms?.length > 0 && (
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+              <span style={{ fontSize: 11, color: THEME.textMuted, fontWeight: 600 }}>≈</span>
+              {word.synonyms.map((s, i) => (
+                <span key={i} className="vm-tag" style={{ background: `${THEME.success}12`, color: THEME.success }}>
+                  {s}
+                </span>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+      
+      {!showDef && onFlip && (
+        <div style={{ marginTop: 20, textAlign: "center", color: THEME.textMuted, fontSize: 13 }}>
+          Tap to reveal definition
+        </div>
+      )}
+    </div>
+  );
+};
+
+// ── MAIN APP ──────────────────────────────────────────────────
+export default function VocabMasterPro() {
+  // State
+  const [words, setWords] = useState(() => {
+    try {
+      const saved = localStorage?.getItem?.("vm_words");
+      return saved ? JSON.parse(saved) : SAMPLE_WORDS;
+    } catch { return SAMPLE_WORDS; }
+  });
+  const [screen, setScreen] = useState("home");
+  const [stats, setStats] = useState(() => {
+    try {
+      const saved = localStorage?.getItem?.("vm_stats");
+      return saved ? JSON.parse(saved) : {
+        streak: 0, lastStudyDate: null, totalReviews: 0, totalQuizzes: 0,
+        perfectQuizzes: 0, nightStudy: false, speedReview: false, todayReviews: 0,
+        todayDate: new Date().toDateString(), xp: 0,
+      };
+    } catch {
+      return { streak: 0, lastStudyDate: null, totalReviews: 0, totalQuizzes: 0, perfectQuizzes: 0, nightStudy: false, speedReview: false, todayReviews: 0, todayDate: new Date().toDateString(), xp: 0 };
+    }
+  });
+  const [toast, setToast] = useState(null);
+  
+  // Persist
+  useEffect(() => {
+    try {
+      localStorage?.setItem?.("vm_words", JSON.stringify(words));
+      localStorage?.setItem?.("vm_stats", JSON.stringify(stats));
+    } catch {}
+  }, [words, stats]);
+  
+  // Inject styles on mount
+  useEffect(() => { injectStyles(); }, []);
+  
+  // Toast system
+  const showToast = useCallback((msg, type = "success") => {
+    setToast({ msg, type });
+    setTimeout(() => setToast(null), 2500);
+  }, []);
+  
+  // Update streak
+  const updateStreak = useCallback(() => {
+    setStats(prev => {
+      const today = new Date().toDateString();
+      if (prev.lastStudyDate === today) return { ...prev, todayReviews: prev.todayReviews + 1 };
+      
+      const yesterday = new Date();
+      yesterday.setDate(yesterday.getDate() - 1);
+      const isConsecutive = prev.lastStudyDate === yesterday.toDateString();
+      
+      const hour = new Date().getHours();
+      return {
+        ...prev,
+        streak: isConsecutive ? prev.streak + 1 : 1,
+        lastStudyDate: today,
+        todayReviews: prev.todayDate === today ? prev.todayReviews + 1 : 1,
+        todayDate: today,
+        nightStudy: prev.nightStudy || (hour >= 0 && hour < 5),
+      };
+    });
+  }, []);
+  
+  // Update word after review
+  const updateWordSRS = useCallback((wordId, rating) => {
+    const quality = SRSEngine.qualityFromRating(rating);
+    setWords(prev => prev.map(w => {
+      if (w.id !== wordId) return w;
+      return { ...w, srs: SRSEngine.processReview(w, quality) };
+    }));
+    updateStreak();
+    setStats(prev => ({
+      ...prev,
+      totalReviews: prev.totalReviews + 1,
+      xp: prev.xp + (quality >= 4 ? 15 : quality >= 3 ? 10 : 5),
+    }));
+  }, [updateStreak]);
+  
+  // Computed
+  const dueWords = useMemo(() => words.filter(w => SRSEngine.isDueForReview(w)), [words]);
+  const masteryDist = useMemo(() => {
+    const dist = [0, 0, 0, 0, 0];
+    words.forEach(w => dist[SRSEngine.getMasteryLevel(w)]++);
+    return dist;
+  }, [words]);
+  const todayProgress = Math.min(1, (stats.todayReviews || 0) / 20);
+  const unlockedAchievements = useMemo(() =>
+    ACHIEVEMENTS.filter(a => a.condition({ ...stats, totalWords: words.length })),
+    [stats, words.length]
+  );
+
+  // ── SCREENS ─────────────────────────────────────────────────
+  
+  // HOME SCREEN
+  const HomeScreen = () => (
+    <div style={{ padding: "20px 16px 100px", maxWidth: 480, margin: "0 auto", animation: "vmFadeIn 0.4s ease" }}>
+      {/* Header */}
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 24 }}>
+        <div>
+          <div style={{ fontSize: 14, color: THEME.textMuted, fontWeight: 500 }}>Welcome back</div>
+          <div style={{ fontSize: 28, fontWeight: 800, background: THEME.gradient1, WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent" }}>
+            VocabMaster
+          </div>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          {stats.streak > 0 && (
+            <div className="vm-streak-badge" style={{
+              background: `${THEME.danger}20`, padding: "8px 14px", borderRadius: 20,
+              display: "flex", alignItems: "center", gap: 6,
+            }}>
+              <span style={{ fontSize: 20 }}>🔥</span>
+              <span style={{ fontWeight: 800, color: THEME.danger, fontSize: 18 }}>{stats.streak}</span>
+            </div>
+          )}
+        </div>
+      </div>
+      
+      {/* Today's Progress */}
+      <div className="vm-card" style={{ padding: 20, marginBottom: 20, position: "relative", overflow: "hidden" }}>
+        <div style={{
+          position: "absolute", top: 0, left: 0, width: `${todayProgress * 100}%`,
+          height: "100%", background: `${THEME.accent}08`,
+          transition: "width 0.8s ease",
+        }} />
+        <div style={{ position: "relative", display: "flex", alignItems: "center", gap: 16 }}>
+          <ProgressRing progress={todayProgress} size={64} stroke={5} />
+          <div style={{ flex: 1 }}>
+            <div style={{ fontSize: 13, color: THEME.textSecondary, fontWeight: 500 }}>Today's Goal</div>
+            <div style={{ fontSize: 24, fontWeight: 800 }}>
+              {stats.todayReviews || 0}<span style={{ fontSize: 14, color: THEME.textMuted }}> / 20 reviews</span>
+            </div>
+            <div style={{ fontSize: 12, color: THEME.accent, fontWeight: 600 }}>
+              {stats.xp} XP earned
+            </div>
+          </div>
+        </div>
+      </div>
+      
+      {/* Quick Actions */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 24 }}>
+        <button className="vm-btn" onClick={() => setScreen("learn")} style={{
+          padding: 20, borderRadius: 16, background: THEME.gradient1, color: "#fff",
+          display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 8,
+        }}>
+          <span style={{ fontSize: 28 }}>🧠</span>
+          <span style={{ fontSize: 16, fontWeight: 700 }}>Learn</span>
+          <span style={{ fontSize: 12, opacity: 0.8 }}>Active Recall</span>
+        </button>
+        
+        <button className="vm-btn" onClick={() => setScreen("review")} style={{
+          padding: 20, borderRadius: 16, background: THEME.gradient2, color: "#fff",
+          display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 8,
+          position: "relative",
+        }}>
+          <span style={{ fontSize: 28 }}>🔄</span>
+          <span style={{ fontSize: 16, fontWeight: 700 }}>Review</span>
+          <span style={{ fontSize: 12, opacity: 0.8 }}>{dueWords.length} due</span>
+          {dueWords.length > 0 && (
+            <div style={{
+              position: "absolute", top: 12, right: 12,
+              background: "#fff", color: "#222", borderRadius: 20,
+              padding: "2px 8px", fontSize: 12, fontWeight: 800,
+            }}>{dueWords.length}</div>
+          )}
+        </button>
+        
+        <button className="vm-btn" onClick={() => setScreen("quiz")} style={{
+          padding: 20, borderRadius: 16, background: THEME.gradient3, color: "#fff",
+          display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 8,
+        }}>
+          <span style={{ fontSize: 28 }}>❓</span>
+          <span style={{ fontSize: 16, fontWeight: 700 }}>Quiz</span>
+          <span style={{ fontSize: 12, opacity: 0.8 }}>6 modes</span>
+        </button>
+        
+        <button className="vm-btn" onClick={() => setScreen("words")} style={{
+          padding: 20, borderRadius: 16, background: THEME.gradient4, color: "#333",
+          display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 8,
+        }}>
+          <span style={{ fontSize: 28 }}>📚</span>
+          <span style={{ fontSize: 16, fontWeight: 700 }}>Words</span>
+          <span style={{ fontSize: 12, opacity: 0.7 }}>{words.length} total</span>
+        </button>
+      </div>
+      
+      {/* Mastery Distribution */}
+      <div className="vm-card" style={{ padding: 20, marginBottom: 20 }}>
+        <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 14 }}>Mastery Progress</div>
+        <div style={{ display: "flex", gap: 4, height: 32, borderRadius: 10, overflow: "hidden", marginBottom: 12 }}>
+          {masteryDist.map((count, i) => (
+            <div key={i} style={{
+              flex: count || 0.3, background: MASTERY[i].color,
+              transition: "flex 0.5s ease", opacity: count ? 1 : 0.15,
+              display: "flex", alignItems: "center", justifyContent: "center",
+              fontSize: 11, fontWeight: 700, color: "#fff",
+              minWidth: count ? 28 : 4,
+            }}>
+              {count > 0 && count}
+            </div>
+          ))}
+        </div>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+          {MASTERY.map((m, i) => (
+            <div key={i} style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11, color: THEME.textSecondary }}>
+              <div style={{ width: 8, height: 8, borderRadius: 2, background: m.color }} />
+              {m.icon} {m.name} ({masteryDist[i]})
+            </div>
+          ))}
+        </div>
+      </div>
+      
+      {/* Leitner Boxes */}
+      <div className="vm-card" style={{ padding: 20, marginBottom: 20 }}>
+        <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 14 }}>📦 Leitner Boxes</div>
+        <div style={{ display: "flex", gap: 8 }}>
+          {[0,1,2,3,4].map(box => {
+            const count = words.filter(w => SRSEngine.getLeitnerBox(w) === box).length;
+            const labels = ["New", "1d", "3d", "7d", "30d+"];
+            const colors = ["#636e72", "#e17055", "#fdcb6e", "#74b9ff", "#00b894"];
+            return (
+              <div key={box} style={{
+                flex: 1, textAlign: "center", padding: "12px 4px", borderRadius: 12,
+                background: `${colors[box]}12`, border: `1.5px solid ${colors[box]}25`,
+              }}>
+                <div style={{ fontSize: 20, fontWeight: 800, color: colors[box] }}>{count}</div>
+                <div style={{ fontSize: 10, color: THEME.textMuted, fontWeight: 600 }}>Box {box+1}</div>
+                <div style={{ fontSize: 9, color: THEME.textMuted }}>{labels[box]}</div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+      
+      {/* Achievements */}
+      <div className="vm-card" style={{ padding: 20 }}>
+        <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 14 }}>
+          🏆 Achievements ({unlockedAchievements.length}/{ACHIEVEMENTS.length})
+        </div>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 8 }}>
+          {ACHIEVEMENTS.map(a => {
+            const unlocked = a.condition({ ...stats, totalWords: words.length });
+            return (
+              <div key={a.id} style={{
+                textAlign: "center", padding: 10, borderRadius: 12,
+                background: unlocked ? `${THEME.accent}12` : THEME.surface,
+                opacity: unlocked ? 1 : 0.35, transition: "all 0.3s",
+              }}>
+                <div style={{ fontSize: 24 }}>{a.icon}</div>
+                <div style={{ fontSize: 9, fontWeight: 600, marginTop: 4, color: unlocked ? THEME.text : THEME.textMuted }}>
+                  {a.name}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+
+  // ── LEARN SCREEN (Active Recall) ────────────────────────────
+  const LearnScreen = () => {
+    const [mode, setMode] = useState(null); // null = select mode
+    const [queue, setQueue] = useState([]);
+    const [idx, setIdx] = useState(0);
+    const [phase, setPhase] = useState("think"); // think, reveal, done
+    const [typedAnswer, setTypedAnswer] = useState("");
+    const [isCorrect, setIsCorrect] = useState(null);
+    const [sessionStats, setSessionStats] = useState({ correct: 0, incorrect: 0 });
+    const inputRef = useRef(null);
+
+    const startSession = (selectedMode) => {
+      setMode(selectedMode);
+      const selected = shuffleArray(dueWords.length > 0 ? dueWords : words).slice(0, 10);
+      setQueue(selected);
+      setIdx(0);
+      setPhase("think");
+      setSessionStats({ correct: 0, incorrect: 0 });
+    };
+
+    const currentWord = queue[idx];
+    const progress = queue.length > 0 ? (idx / queue.length) : 0;
+
+    const handleRate = (rating) => {
+      if (!currentWord) return;
+      updateWordSRS(currentWord.id, rating);
+      const isGood = rating === "good" || rating === "easy";
+      setSessionStats(p => ({
+        correct: p.correct + (isGood ? 1 : 0),
+        incorrect: p.incorrect + (isGood ? 0 : 1),
+      }));
+      if (idx + 1 >= queue.length) {
+        setPhase("done");
+      } else {
+        setIdx(i => i + 1);
+        setPhase("think");
+        setTypedAnswer("");
+        setIsCorrect(null);
+      }
+    };
+
+    const checkTyped = () => {
+      if (!currentWord) return;
+      const correct = typedAnswer.trim().toLowerCase() === currentWord.term.toLowerCase();
+      setIsCorrect(correct);
+      setPhase("reveal");
+    };
+
+    // Mode Select
+    if (!mode) return (
+      <div style={{ padding: "20px 16px 100px", maxWidth: 480, margin: "0 auto", animation: "vmFadeIn 0.4s ease" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 28 }}>
+          <button className="vm-btn" onClick={() => setScreen("home")} style={{ background: "none", color: THEME.textSecondary, fontSize: 22, padding: 4 }}>←</button>
+          <div style={{ fontSize: 22, fontWeight: 800 }}>Choose Learning Mode</div>
+        </div>
+        
+        {[
+          { id: "recall", icon: "🧠", name: "Active Recall", desc: "See word → Think → Reveal → Rate", rec: true, color: THEME.accent },
+          { id: "type", icon: "⌨️", name: "Type Answer", desc: "See definition → Type the word → Check", color: THEME.success },
+          { id: "listen", icon: "👂", name: "Listening", desc: "Hear pronunciation → Recall meaning → Rate", color: THEME.info },
+        ].map(m => (
+          <button key={m.id} className="vm-btn vm-card" onClick={() => startSession(m.id)} style={{
+            width: "100%", padding: 20, marginBottom: 12, textAlign: "left",
+            display: "flex", alignItems: "center", gap: 16,
+            border: m.rec ? `2px solid ${m.color}40` : undefined,
+          }}>
+            <div style={{
+              width: 56, height: 56, borderRadius: 16, background: `${m.color}15`,
+              display: "flex", alignItems: "center", justifyContent: "center", fontSize: 28, flexShrink: 0,
+            }}>{m.icon}</div>
+            <div>
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span style={{ fontSize: 17, fontWeight: 700, color: THEME.text }}>{m.name}</span>
+                {m.rec && <span className="vm-tag" style={{ background: `${THEME.accent}20`, color: THEME.accent, fontSize: 10 }}>Recommended</span>}
+              </div>
+              <div style={{ fontSize: 13, color: THEME.textSecondary, marginTop: 4 }}>{m.desc}</div>
+            </div>
+          </button>
+        ))}
+        
+        <div className="vm-card" style={{ padding: 16, marginTop: 16, background: `${THEME.accent}08` }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: THEME.accent, marginBottom: 6 }}>💡 Why Active Recall?</div>
+          <div style={{ fontSize: 13, color: THEME.textSecondary, lineHeight: 1.6 }}>
+            Actively trying to remember <strong style={{ color: THEME.text }}>before</strong> seeing the answer 
+            increases retention by <strong style={{ color: THEME.success }}>3x</strong> compared to passive reading.
+            Combined with Spaced Repetition (SM-2), this is the most scientifically proven method for long-term memory.
+          </div>
+        </div>
+      </div>
+    );
+
+    // Session Complete
+    if (phase === "done") {
+      const total = sessionStats.correct + sessionStats.incorrect;
+      const accuracy = total > 0 ? Math.round((sessionStats.correct / total) * 100) : 0;
+      return (
+        <div style={{ padding: "40px 16px 100px", maxWidth: 480, margin: "0 auto", textAlign: "center", animation: "vmBounceIn 0.5s ease" }}>
+          <div style={{ fontSize: 64, marginBottom: 16 }}>{accuracy >= 80 ? "🎉" : accuracy >= 50 ? "👍" : "💪"}</div>
+          <div style={{ fontSize: 28, fontWeight: 800, marginBottom: 8 }}>Session Complete!</div>
+          <div style={{ fontSize: 15, color: THEME.textSecondary, marginBottom: 32 }}>
+            {accuracy >= 80 ? "Excellent work!" : accuracy >= 50 ? "Good progress!" : "Keep practicing!"}
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12, marginBottom: 32 }}>
+            <div className="vm-card" style={{ padding: 16 }}>
+              <div style={{ fontSize: 28, fontWeight: 800, color: THEME.accent }}>{total}</div>
+              <div style={{ fontSize: 11, color: THEME.textMuted }}>Words</div>
+            </div>
+            <div className="vm-card" style={{ padding: 16 }}>
+              <div style={{ fontSize: 28, fontWeight: 800, color: THEME.success }}>{accuracy}%</div>
+              <div style={{ fontSize: 11, color: THEME.textMuted }}>Accuracy</div>
+            </div>
+            <div className="vm-card" style={{ padding: 16 }}>
+              <div style={{ fontSize: 28, fontWeight: 800, color: THEME.warning }}>+{total * 10}</div>
+              <div style={{ fontSize: 11, color: THEME.textMuted }}>XP</div>
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: 12 }}>
+            <button className="vm-btn" onClick={() => startSession(mode)} style={{
+              flex: 1, padding: 16, borderRadius: 14, background: THEME.gradient1, color: "#fff", fontSize: 15,
+            }}>Learn More</button>
+            <button className="vm-btn" onClick={() => setScreen("home")} style={{
+              flex: 1, padding: 16, borderRadius: 14, background: THEME.card, color: THEME.text, fontSize: 15, border: `1px solid ${THEME.border}`,
+            }}>Home</button>
+          </div>
+        </div>
+      );
+    }
+
+    if (!currentWord) return null;
+
+    // Active Recall Mode
+    if (mode === "recall") return (
+      <div style={{ padding: "20px 16px 100px", maxWidth: 480, margin: "0 auto", animation: "vmFadeIn 0.3s ease" }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 20 }}>
+          <button className="vm-btn" onClick={() => setMode(null)} style={{ background: "none", color: THEME.textSecondary, fontSize: 22, padding: 4 }}>←</button>
+          <div style={{ fontSize: 13, fontWeight: 600, color: THEME.textSecondary }}>{idx + 1} / {queue.length}</div>
+          <div className="vm-mono" style={{ fontSize: 12, color: THEME.accent }}>Active Recall</div>
+        </div>
+        
+        <div style={{ height: 4, borderRadius: 2, background: THEME.border, marginBottom: 24, overflow: "hidden" }}>
+          <div style={{ height: "100%", width: `${((idx + (phase === "reveal" ? 1 : 0.5)) / queue.length) * 100}%`, background: THEME.gradient1, transition: "width 0.4s ease", borderRadius: 2 }} />
+        </div>
+        
+        <WordCard word={currentWord} showDef={phase === "reveal"} onFlip={phase === "think" ? () => setPhase("reveal") : undefined} />
+        
+        {phase === "think" && (
+          <div style={{ marginTop: 20, animation: "vmFadeIn 0.3s ease" }}>
+            {currentWord.examples?.[0] && (
+              <div style={{ padding: 14, borderRadius: 12, background: `${THEME.warning}08`, border: `1px solid ${THEME.warning}15`, marginBottom: 16 }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: THEME.warning, marginBottom: 6 }}>💡 Context Hint</div>
+                <div style={{ fontSize: 14, color: THEME.textSecondary, fontStyle: "italic" }}>
+                  "{currentWord.examples[0].replace(new RegExp(currentWord.term, "gi"), "_____")}"
+                </div>
+              </div>
+            )}
+            <div style={{ display: "flex", gap: 12 }}>
+              <button className="vm-btn" onClick={() => setPhase("reveal")} style={{
+                flex: 1, padding: 16, borderRadius: 14, background: `${THEME.danger}15`,
+                color: THEME.danger, fontSize: 15, border: `1.5px solid ${THEME.danger}30`,
+              }}>🤔 Don't Know</button>
+              <button className="vm-btn" onClick={() => setPhase("reveal")} style={{
+                flex: 1, padding: 16, borderRadius: 14, background: `${THEME.success}15`,
+                color: THEME.success, fontSize: 15, border: `1.5px solid ${THEME.success}30`,
+              }}>💡 I Think I Know</button>
+            </div>
+          </div>
+        )}
+        
+        {phase === "reveal" && (
+          <div style={{ marginTop: 20, animation: "vmSlideUp 0.3s ease" }}>
+            <RatingButtons onRate={handleRate} />
+          </div>
+        )}
+      </div>
+    );
+
+    // Type Answer Mode
+    if (mode === "type") return (
+      <div style={{ padding: "20px 16px 100px", maxWidth: 480, margin: "0 auto", animation: "vmFadeIn 0.3s ease" }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 20 }}>
+          <button className="vm-btn" onClick={() => setMode(null)} style={{ background: "none", color: THEME.textSecondary, fontSize: 22, padding: 4 }}>←</button>
+          <div style={{ fontSize: 13, fontWeight: 600, color: THEME.textSecondary }}>{idx + 1} / {queue.length}</div>
+          <div className="vm-mono" style={{ fontSize: 12, color: THEME.success }}>Type Answer</div>
+        </div>
+        
+        <div style={{ height: 4, borderRadius: 2, background: THEME.border, marginBottom: 24, overflow: "hidden" }}>
+          <div style={{ height: "100%", width: `${((idx + (phase === "reveal" ? 1 : 0.5)) / queue.length) * 100}%`, background: THEME.gradient2, transition: "width 0.4s ease", borderRadius: 2 }} />
+        </div>
+        
+        <div className="vm-card" style={{ padding: 24, marginBottom: 20 }}>
+          <div style={{ fontSize: 11, fontWeight: 700, color: THEME.textMuted, textTransform: "uppercase", letterSpacing: 1, marginBottom: 12 }}>Definition</div>
+          <div style={{ fontSize: 18, fontWeight: 500, lineHeight: 1.5, marginBottom: 16 }}>{currentWord.definition}</div>
+          {currentWord.examples?.[0] && (
+            <div style={{ padding: 12, borderRadius: 10, background: THEME.surface, borderLeft: `3px solid ${THEME.success}40`, fontSize: 14, color: THEME.textSecondary, fontStyle: "italic" }}>
+              "{currentWord.examples[0].replace(new RegExp(currentWord.term, "gi"), "_____")}"
+            </div>
+          )}
+        </div>
+        
+        {phase === "think" && (
+          <div style={{ animation: "vmFadeIn 0.3s ease" }}>
+            <div style={{ position: "relative", marginBottom: 16 }}>
+              <input ref={inputRef} className="vm-input" value={typedAnswer} onChange={e => setTypedAnswer(e.target.value)}
+                onKeyDown={e => e.key === "Enter" && typedAnswer.trim() && checkTyped()}
+                placeholder="Type the English word..." autoFocus
+                style={{ fontSize: 18, padding: "16px 20px", textAlign: "center", fontWeight: 600 }}
+              />
+            </div>
+            <button className="vm-btn" onClick={checkTyped} disabled={!typedAnswer.trim()} style={{
+              width: "100%", padding: 16, borderRadius: 14,
+              background: typedAnswer.trim() ? THEME.gradient2 : THEME.border,
+              color: typedAnswer.trim() ? "#fff" : THEME.textMuted,
+              fontSize: 16, opacity: typedAnswer.trim() ? 1 : 0.5,
+            }}>Check Answer</button>
+          </div>
+        )}
+        
+        {phase === "reveal" && (
+          <div style={{ animation: "vmSlideUp 0.3s ease" }}>
+            <div className="vm-card" style={{
+              padding: 16, marginBottom: 16, textAlign: "center",
+              background: isCorrect ? `${THEME.success}10` : `${THEME.danger}10`,
+              border: `2px solid ${isCorrect ? THEME.success : THEME.danger}30`,
+            }}>
+              <div style={{ fontSize: 32, marginBottom: 8 }}>{isCorrect ? "✅" : "❌"}</div>
+              <div style={{ fontSize: 18, fontWeight: 700, color: isCorrect ? THEME.success : THEME.danger }}>
+                {isCorrect ? "Correct!" : "Not quite..."}
+              </div>
+              {!isCorrect && (
+                <div style={{ marginTop: 8 }}>
+                  <span style={{ color: THEME.textMuted }}>Answer: </span>
+                  <span style={{ fontWeight: 700, color: THEME.text, fontSize: 18 }}>{currentWord.term}</span>
+                </div>
+              )}
+            </div>
+            <RatingButtons onRate={handleRate} showEasy={isCorrect} />
+          </div>
+        )}
+      </div>
+    );
+
+    // Listening Mode
+    if (mode === "listen") return (
+      <div style={{ padding: "20px 16px 100px", maxWidth: 480, margin: "0 auto", animation: "vmFadeIn 0.3s ease" }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 20 }}>
+          <button className="vm-btn" onClick={() => setMode(null)} style={{ background: "none", color: THEME.textSecondary, fontSize: 22, padding: 4 }}>←</button>
+          <div style={{ fontSize: 13, fontWeight: 600, color: THEME.textSecondary }}>{idx + 1} / {queue.length}</div>
+          <div className="vm-mono" style={{ fontSize: 12, color: THEME.info }}>Listening</div>
+        </div>
+        
+        <div style={{ height: 4, borderRadius: 2, background: THEME.border, marginBottom: 24, overflow: "hidden" }}>
+          <div style={{ height: "100%", width: `${((idx + (phase === "reveal" ? 1 : 0.5)) / queue.length) * 100}%`, background: `linear-gradient(90deg, ${THEME.info}, ${THEME.accentLight})`, transition: "width 0.4s ease", borderRadius: 2 }} />
+        </div>
+        
+        <div className="vm-card" style={{ padding: 40, textAlign: "center", marginBottom: 20 }}>
+          {phase === "think" ? (
+            <div style={{ animation: "vmFadeIn 0.3s ease" }}>
+              <button className="vm-btn" onClick={() => speak(currentWord.term, 0.7)} style={{
+                width: 100, height: 100, borderRadius: "50%", background: `${THEME.info}15`,
+                border: `3px solid ${THEME.info}40`, fontSize: 40, color: THEME.info,
+                display: "flex", alignItems: "center", justifyContent: "center", margin: "0 auto 20px",
+              }}>🔊</button>
+              <div style={{ fontSize: 14, color: THEME.textSecondary, marginBottom: 8 }}>Listen and try to recall the meaning</div>
+              <div className="vm-mono" style={{ fontSize: 13, color: THEME.textMuted }}>{currentWord.phonetic}</div>
+              <div style={{ marginTop: 24, display: "flex", gap: 12, justifyContent: "center" }}>
+                <button className="vm-btn" onClick={() => speak(currentWord.term, 0.5)} style={{
+                  padding: "10px 20px", borderRadius: 12, background: THEME.surface, color: THEME.textSecondary, fontSize: 13, border: `1px solid ${THEME.border}`,
+                }}>🐢 Slow</button>
+                <button className="vm-btn" onClick={() => setPhase("reveal")} style={{
+                  padding: "10px 28px", borderRadius: 12, background: THEME.gradient1, color: "#fff", fontSize: 14,
+                }}>Reveal</button>
+              </div>
+            </div>
+          ) : (
+            <div style={{ animation: "vmBounceIn 0.4s ease" }}>
+              <div style={{ fontSize: 36, fontWeight: 800, marginBottom: 8 }}>{currentWord.term}</div>
+              <div style={{ fontSize: 16, color: THEME.textSecondary, lineHeight: 1.5 }}>{currentWord.definition}</div>
+            </div>
+          )}
+        </div>
+        
+        {phase === "reveal" && (
+          <div style={{ animation: "vmSlideUp 0.3s ease" }}>
+            <RatingButtons onRate={handleRate} />
+          </div>
+        )}
+      </div>
+    );
+
+    return null;
+  };
+
+  // ── REVIEW SCREEN (Flashcards + SRS) ────────────────────────
+  const ReviewScreen = () => {
+    const [queue, setQueue] = useState([]);
+    const [idx, setIdx] = useState(0);
+    const [flipped, setFlipped] = useState(false);
+    const [started, setStarted] = useState(false);
+    const [sessionDone, setSessionDone] = useState(false);
+    const [sessionStats, setSessionStats] = useState({ correct: 0, incorrect: 0 });
+
+    const startReview = () => {
+      const q = shuffleArray(dueWords.length > 0 ? dueWords : words).slice(0, 15);
+      setQueue(q);
+      setIdx(0);
+      setFlipped(false);
+      setStarted(true);
+      setSessionDone(false);
+      setSessionStats({ correct: 0, incorrect: 0 });
+    };
+
+    const handleRate = (rating) => {
+      if (!queue[idx]) return;
+      updateWordSRS(queue[idx].id, rating);
+      const isGood = rating === "good" || rating === "easy";
+      setSessionStats(p => ({ correct: p.correct + (isGood ? 1 : 0), incorrect: p.incorrect + (isGood ? 0 : 1) }));
+      
+      if (idx + 1 >= queue.length) {
+        setSessionDone(true);
+      } else {
+        setIdx(i => i + 1);
+        setFlipped(false);
+      }
+    };
+
+    if (!started) return (
+      <div style={{ padding: "20px 16px 100px", maxWidth: 480, margin: "0 auto", animation: "vmFadeIn 0.4s ease" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 28 }}>
+          <button className="vm-btn" onClick={() => setScreen("home")} style={{ background: "none", color: THEME.textSecondary, fontSize: 22, padding: 4 }}>←</button>
+          <div style={{ fontSize: 22, fontWeight: 800 }}>Flashcard Review</div>
+        </div>
+        
+        <div className="vm-card" style={{ padding: 24, textAlign: "center", marginBottom: 20 }}>
+          <div style={{ fontSize: 48, marginBottom: 12 }}>🔄</div>
+          <div style={{ fontSize: 20, fontWeight: 700, marginBottom: 8 }}>Spaced Repetition Review</div>
+          <div style={{ fontSize: 14, color: THEME.textSecondary, marginBottom: 20 }}>
+            Review flashcards with the SM-2 algorithm. Cards you struggle with will appear more often.
+          </div>
+          <div style={{ display: "flex", gap: 16, justifyContent: "center", marginBottom: 20 }}>
+            <div>
+              <div style={{ fontSize: 28, fontWeight: 800, color: THEME.danger }}>{dueWords.length}</div>
+              <div style={{ fontSize: 11, color: THEME.textMuted }}>Due now</div>
+            </div>
+            <div style={{ width: 1, background: THEME.border }} />
+            <div>
+              <div style={{ fontSize: 28, fontWeight: 800, color: THEME.accent }}>{words.length}</div>
+              <div style={{ fontSize: 11, color: THEME.textMuted }}>Total words</div>
+            </div>
+          </div>
+          <button className="vm-btn" onClick={startReview} style={{
+            padding: "16px 48px", borderRadius: 14, background: THEME.gradient2, color: "#fff", fontSize: 16,
+          }}>Start Review</button>
+        </div>
+      </div>
+    );
+
+    if (sessionDone) {
+      const total = sessionStats.correct + sessionStats.incorrect;
+      const accuracy = total > 0 ? Math.round((sessionStats.correct / total) * 100) : 0;
+      return (
+        <div style={{ padding: "40px 16px 100px", maxWidth: 480, margin: "0 auto", textAlign: "center", animation: "vmBounceIn 0.5s ease" }}>
+          <div style={{ fontSize: 64, marginBottom: 16 }}>🎯</div>
+          <div style={{ fontSize: 28, fontWeight: 800, marginBottom: 8 }}>Review Complete!</div>
+          <div style={{ fontSize: 32, fontWeight: 800, color: accuracy >= 70 ? THEME.success : THEME.warning, marginBottom: 24 }}>{accuracy}% accuracy</div>
+          <div style={{ display: "flex", gap: 12 }}>
+            <button className="vm-btn" onClick={startReview} style={{ flex: 1, padding: 16, borderRadius: 14, background: THEME.gradient2, color: "#fff", fontSize: 15 }}>Review Again</button>
+            <button className="vm-btn" onClick={() => setScreen("home")} style={{ flex: 1, padding: 16, borderRadius: 14, background: THEME.card, color: THEME.text, fontSize: 15, border: `1px solid ${THEME.border}` }}>Home</button>
+          </div>
+        </div>
+      );
+    }
+
+    const currentWord = queue[idx];
+    if (!currentWord) return null;
+
+    return (
+      <div style={{ padding: "20px 16px 100px", maxWidth: 480, margin: "0 auto" }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 20 }}>
+          <button className="vm-btn" onClick={() => setStarted(false)} style={{ background: "none", color: THEME.textSecondary, fontSize: 22, padding: 4 }}>←</button>
+          <div style={{ fontSize: 13, fontWeight: 600, color: THEME.textSecondary }}>{idx + 1} / {queue.length}</div>
+        </div>
+        
+        <div style={{ height: 4, borderRadius: 2, background: THEME.border, marginBottom: 24, overflow: "hidden" }}>
+          <div style={{ height: "100%", width: `${((idx + (flipped ? 1 : 0.5)) / queue.length) * 100}%`, background: THEME.gradient2, transition: "width 0.4s ease", borderRadius: 2 }} />
+        </div>
+
+        <WordCard word={currentWord} showDef={flipped} onFlip={() => !flipped && setFlipped(true)} />
+        
+        {flipped && (
+          <div style={{ marginTop: 20, animation: "vmSlideUp 0.3s ease" }}>
+            <RatingButtons onRate={handleRate} />
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  // ── QUIZ SCREEN ─────────────────────────────────────────────
+  const QuizScreen = () => {
+    const [quizType, setQuizType] = useState(null);
+    const [questions, setQuestions] = useState([]);
+    const [qIdx, setQIdx] = useState(0);
+    const [selected, setSelected] = useState(null);
+    const [answered, setAnswered] = useState(false);
+    const [score, setScore] = useState(0);
+    const [quizDone, setQuizDone] = useState(false);
+    const [spellingInput, setSpellingInput] = useState("");
+    const spellingRef = useRef(null);
+
+    const generateQuiz = (type) => {
+      setQuizType(type);
+      const pool = shuffleArray(words);
+      const qs = [];
+      const count = Math.min(10, pool.length);
+      
+      for (let i = 0; i < count; i++) {
+        const word = pool[i];
+        const others = pool.filter((_, j) => j !== i);
+        const distractors = shuffleArray(others).slice(0, 3);
+        
+        if (type === "mc") {
+          const options = shuffleArray([
+            { text: word.definition, correct: true },
+            ...distractors.map(d => ({ text: d.definition, correct: false })),
+          ]);
+          qs.push({ word, options, type: "mc" });
+        } else if (type === "tf") {
+          const isTrue = Math.random() > 0.5;
+          const fakeDef = distractors[0]?.definition || "Not a real definition";
+          qs.push({ word, shownDef: isTrue ? word.definition : fakeDef, isTrue, type: "tf" });
+        } else if (type === "fill") {
+          const example = word.examples?.[0] || `The word is ${word.term}.`;
+          const blank = example.replace(new RegExp(word.term, "gi"), "_____");
+          qs.push({ word, blank, type: "fill" });
+        } else if (type === "spell") {
+          qs.push({ word, type: "spell" });
+        } else if (type === "listen") {
+          const options = shuffleArray([
+            { text: word.term, correct: true },
+            ...distractors.slice(0, 3).map(d => ({ text: d.term, correct: false })),
+          ]);
+          qs.push({ word, options, type: "listen" });
+        } else if (type === "match") {
+          // Match uses pairs
+          const matchWords = pool.slice(i, Math.min(i + 4, pool.length));
+          if (matchWords.length >= 2) {
+            qs.push({ words: matchWords, type: "match" });
+          }
+          if (qs.length >= 5) break;
+        }
+      }
+      
+      setQuestions(qs);
+      setQIdx(0);
+      setSelected(null);
+      setAnswered(false);
+      setScore(0);
+      setQuizDone(false);
+    };
+
+    const checkAnswer = (answer) => {
+      if (answered) return;
+      setSelected(answer);
+      setAnswered(true);
+      
+      const q = questions[qIdx];
+      let correct = false;
+      
+      if (q.type === "mc" || q.type === "listen") correct = answer.correct;
+      else if (q.type === "tf") correct = answer === q.isTrue;
+      else if (q.type === "fill" || q.type === "spell") {
+        correct = answer.toLowerCase().trim() === q.word.term.toLowerCase();
+      }
+      
+      if (correct) {
+        setScore(s => s + 1);
+        updateWordSRS(q.word?.id || q.words?.[0]?.id, "good");
+      } else if (q.word) {
+        updateWordSRS(q.word.id, "again");
+      }
+    };
+
+    const nextQuestion = () => {
+      if (qIdx + 1 >= questions.length) {
+        setQuizDone(true);
+        const total = questions.length;
+        if (score + (answered && selected?.correct ? 1 : 0) === total) {
+          setStats(p => ({ ...p, perfectQuizzes: (p.perfectQuizzes || 0) + 1 }));
+        }
+        setStats(p => ({ ...p, totalQuizzes: (p.totalQuizzes || 0) + 1 }));
+      } else {
+        setQIdx(q => q + 1);
+        setSelected(null);
+        setAnswered(false);
+        setSpellingInput("");
+      }
+    };
+
+    // Quiz Type Select
+    if (!quizType) return (
+      <div style={{ padding: "20px 16px 100px", maxWidth: 480, margin: "0 auto", animation: "vmFadeIn 0.4s ease" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 28 }}>
+          <button className="vm-btn" onClick={() => setScreen("home")} style={{ background: "none", color: THEME.textSecondary, fontSize: 22, padding: 4 }}>←</button>
+          <div style={{ fontSize: 22, fontWeight: 800 }}>Quiz Mode</div>
+        </div>
+        
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+          {[
+            { id: "mc", icon: "🔤", name: "Multiple Choice", desc: "Pick the right definition", color: THEME.accent },
+            { id: "tf", icon: "✅", name: "True / False", desc: "Is this definition correct?", color: THEME.success },
+            { id: "fill", icon: "✏️", name: "Fill in Blank", desc: "Complete the sentence", color: THEME.warning },
+            { id: "spell", icon: "📝", name: "Spelling", desc: "Type the correct word", color: THEME.info },
+            { id: "listen", icon: "👂", name: "Listening", desc: "Identify the spoken word", color: THEME.danger },
+            { id: "match", icon: "🔗", name: "Matching", desc: "Match words to meanings", color: "#a29bfe" },
+          ].map(q => (
+            <button key={q.id} className="vm-btn vm-card" onClick={() => generateQuiz(q.id)} style={{
+              padding: 20, display: "flex", flexDirection: "column", alignItems: "center", gap: 8, textAlign: "center",
+            }}>
+              <div style={{ fontSize: 32 }}>{q.icon}</div>
+              <div style={{ fontSize: 14, fontWeight: 700, color: q.color }}>{q.name}</div>
+              <div style={{ fontSize: 11, color: THEME.textMuted }}>{q.desc}</div>
+            </button>
+          ))}
+        </div>
+      </div>
+    );
+
+    // Quiz Done
+    if (quizDone) {
+      const accuracy = Math.round((score / questions.length) * 100);
+      return (
+        <div style={{ padding: "40px 16px 100px", maxWidth: 480, margin: "0 auto", textAlign: "center", animation: "vmBounceIn 0.5s ease" }}>
+          <div style={{ fontSize: 64, marginBottom: 16 }}>{accuracy === 100 ? "🏆" : accuracy >= 70 ? "🎉" : "💪"}</div>
+          <div style={{ fontSize: 28, fontWeight: 800, marginBottom: 8 }}>Quiz Complete!</div>
+          <div style={{ fontSize: 40, fontWeight: 800, color: accuracy >= 70 ? THEME.success : THEME.warning }}>{score}/{questions.length}</div>
+          <div style={{ fontSize: 16, color: THEME.textSecondary, marginBottom: 32 }}>{accuracy}% correct</div>
+          <div style={{ display: "flex", gap: 12 }}>
+            <button className="vm-btn" onClick={() => generateQuiz(quizType)} style={{ flex: 1, padding: 16, borderRadius: 14, background: THEME.gradient1, color: "#fff", fontSize: 15 }}>Try Again</button>
+            <button className="vm-btn" onClick={() => setQuizType(null)} style={{ flex: 1, padding: 16, borderRadius: 14, background: THEME.card, color: THEME.text, fontSize: 15, border: `1px solid ${THEME.border}` }}>Other Quiz</button>
+          </div>
+        </div>
+      );
+    }
+
+    const q = questions[qIdx];
+    if (!q) return null;
+    const progress = (qIdx / questions.length) * 100;
+
+    return (
+      <div style={{ padding: "20px 16px 100px", maxWidth: 480, margin: "0 auto" }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
+          <button className="vm-btn" onClick={() => setQuizType(null)} style={{ background: "none", color: THEME.textSecondary, fontSize: 22, padding: 4 }}>←</button>
+          <div style={{ fontSize: 13, fontWeight: 600, color: THEME.textSecondary }}>Q{qIdx + 1} / {questions.length}</div>
+          <div className="vm-tag" style={{ background: `${THEME.success}15`, color: THEME.success }}>{score} ✓</div>
+        </div>
+        
+        <div style={{ height: 4, borderRadius: 2, background: THEME.border, marginBottom: 24, overflow: "hidden" }}>
+          <div style={{ height: "100%", width: `${progress}%`, background: THEME.gradient1, transition: "width 0.4s ease", borderRadius: 2 }} />
+        </div>
+
+        {/* Multiple Choice */}
+        {q.type === "mc" && (
+          <div style={{ animation: "vmFadeIn 0.3s ease" }}>
+            <div className="vm-card" style={{ padding: 20, marginBottom: 20, textAlign: "center" }}>
+              <div style={{ fontSize: 11, fontWeight: 700, color: THEME.textMuted, textTransform: "uppercase", letterSpacing: 1, marginBottom: 8 }}>What does this word mean?</div>
+              <div style={{ fontSize: 28, fontWeight: 800 }}>{q.word.term}</div>
+              <div className="vm-mono" style={{ fontSize: 13, color: THEME.textMuted }}>{q.word.phonetic}</div>
+            </div>
+            {q.options.map((opt, i) => (
+              <button key={i} className="vm-btn" onClick={() => checkAnswer(opt)} disabled={answered} style={{
+                width: "100%", padding: 16, marginBottom: 10, borderRadius: 14, textAlign: "left",
+                background: !answered ? THEME.card : opt.correct ? `${THEME.success}15` : (selected === opt ? `${THEME.danger}15` : THEME.card),
+                border: `1.5px solid ${!answered ? THEME.border : opt.correct ? THEME.success : (selected === opt ? THEME.danger : THEME.border)}`,
+                color: THEME.text, fontSize: 14, lineHeight: 1.5, opacity: answered && !opt.correct && selected !== opt ? 0.4 : 1,
+              }}>
+                <span style={{ fontWeight: 600, marginRight: 8, color: THEME.textMuted }}>{String.fromCharCode(65 + i)}.</span>
+                {opt.text}
+                {answered && opt.correct && <span style={{ float: "right", color: THEME.success }}>✓</span>}
+                {answered && selected === opt && !opt.correct && <span style={{ float: "right", color: THEME.danger }}>✕</span>}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {/* True/False */}
+        {q.type === "tf" && (
+          <div style={{ animation: "vmFadeIn 0.3s ease" }}>
+            <div className="vm-card" style={{ padding: 20, marginBottom: 20 }}>
+              <div style={{ fontSize: 22, fontWeight: 800, marginBottom: 8 }}>{q.word.term}</div>
+              <div style={{ fontSize: 11, fontWeight: 700, color: THEME.textMuted, marginBottom: 8 }}>Is this definition correct?</div>
+              <div style={{ fontSize: 16, color: THEME.textSecondary, lineHeight: 1.5, padding: 14, borderRadius: 10, background: THEME.surface }}>
+                "{q.shownDef}"
+              </div>
+            </div>
+            <div style={{ display: "flex", gap: 12 }}>
+              {[true, false].map(val => (
+                <button key={String(val)} className="vm-btn" onClick={() => checkAnswer(val)} disabled={answered} style={{
+                  flex: 1, padding: 20, borderRadius: 14, fontSize: 18, fontWeight: 700,
+                  background: !answered ? (val ? `${THEME.success}12` : `${THEME.danger}12`) :
+                    (val === q.isTrue ? `${THEME.success}20` : (selected === val ? `${THEME.danger}20` : THEME.card)),
+                  color: val ? THEME.success : THEME.danger,
+                  border: `2px solid ${!answered ? "transparent" : (val === q.isTrue ? THEME.success : (selected === val ? THEME.danger : "transparent"))}`,
+                }}>
+                  {val ? "✓ True" : "✕ False"}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Fill in Blank */}
+        {q.type === "fill" && (
+          <div style={{ animation: "vmFadeIn 0.3s ease" }}>
+            <div className="vm-card" style={{ padding: 20, marginBottom: 20 }}>
+              <div style={{ fontSize: 11, fontWeight: 700, color: THEME.textMuted, textTransform: "uppercase", letterSpacing: 1, marginBottom: 12 }}>Fill in the blank</div>
+              <div style={{ fontSize: 17, lineHeight: 1.6 }}>{q.blank}</div>
+            </div>
+            {!answered ? (
+              <div>
+                <input className="vm-input" value={spellingInput} onChange={e => setSpellingInput(e.target.value)}
+                  onKeyDown={e => e.key === "Enter" && spellingInput.trim() && checkAnswer(spellingInput)}
+                  placeholder="Type the missing word..." autoFocus
+                  style={{ fontSize: 17, padding: "14px 18px", textAlign: "center", fontWeight: 600, marginBottom: 12 }}
+                />
+                <button className="vm-btn" onClick={() => checkAnswer(spellingInput)} disabled={!spellingInput.trim()} style={{
+                  width: "100%", padding: 14, borderRadius: 14, background: spellingInput.trim() ? THEME.gradient1 : THEME.border,
+                  color: "#fff", fontSize: 15, opacity: spellingInput.trim() ? 1 : 0.5,
+                }}>Submit</button>
+              </div>
+            ) : (
+              <div className="vm-card" style={{
+                padding: 16, textAlign: "center",
+                background: selected.toLowerCase().trim() === q.word.term.toLowerCase() ? `${THEME.success}10` : `${THEME.danger}10`,
+              }}>
+                <div style={{ fontSize: 24 }}>{selected.toLowerCase().trim() === q.word.term.toLowerCase() ? "✅" : "❌"}</div>
+                <div style={{ fontWeight: 700, fontSize: 18, marginTop: 8 }}>Answer: {q.word.term}</div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Spelling */}
+        {q.type === "spell" && (
+          <div style={{ animation: "vmFadeIn 0.3s ease" }}>
+            <div className="vm-card" style={{ padding: 20, marginBottom: 20, textAlign: "center" }}>
+              <div style={{ fontSize: 11, fontWeight: 700, color: THEME.textMuted, textTransform: "uppercase", letterSpacing: 1, marginBottom: 12 }}>Spell this word</div>
+              <div style={{ fontSize: 16, color: THEME.textSecondary, marginBottom: 8 }}>{q.word.definition}</div>
+              <button className="vm-btn" onClick={() => speak(q.word.term)} style={{ background: `${THEME.info}15`, color: THEME.info, padding: "8px 20px", borderRadius: 10, fontSize: 14 }}>
+                🔊 Listen
+              </button>
+            </div>
+            {!answered ? (
+              <div>
+                <input className="vm-input" ref={spellingRef} value={spellingInput} onChange={e => setSpellingInput(e.target.value)}
+                  onKeyDown={e => e.key === "Enter" && spellingInput.trim() && checkAnswer(spellingInput)}
+                  placeholder="Type the word..." autoFocus
+                  style={{ fontSize: 20, padding: "16px 18px", textAlign: "center", fontWeight: 600, letterSpacing: 2, marginBottom: 12 }}
+                />
+                <button className="vm-btn" onClick={() => checkAnswer(spellingInput)} disabled={!spellingInput.trim()} style={{
+                  width: "100%", padding: 14, borderRadius: 14, background: spellingInput.trim() ? THEME.gradient1 : THEME.border,
+                  color: "#fff", fontSize: 15, opacity: spellingInput.trim() ? 1 : 0.5,
+                }}>Check Spelling</button>
+              </div>
+            ) : (
+              <div className="vm-card" style={{
+                padding: 16, textAlign: "center",
+                background: selected.toLowerCase().trim() === q.word.term.toLowerCase() ? `${THEME.success}10` : `${THEME.danger}10`,
+              }}>
+                <div style={{ fontSize: 24 }}>{selected.toLowerCase().trim() === q.word.term.toLowerCase() ? "✅" : "❌"}</div>
+                <div style={{ fontWeight: 700, fontSize: 20, marginTop: 8, letterSpacing: 1 }}>{q.word.term}</div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Listening Quiz */}
+        {q.type === "listen" && (
+          <div style={{ animation: "vmFadeIn 0.3s ease" }}>
+            <div className="vm-card" style={{ padding: 24, marginBottom: 20, textAlign: "center" }}>
+              <div style={{ fontSize: 11, fontWeight: 700, color: THEME.textMuted, textTransform: "uppercase", letterSpacing: 1, marginBottom: 12 }}>Which word did you hear?</div>
+              <div style={{ fontSize: 16, color: THEME.textSecondary, marginBottom: 16 }}>"{q.word.definition}"</div>
+              <button className="vm-btn" onClick={() => speak(q.word.term)} style={{
+                width: 80, height: 80, borderRadius: "50%", background: `${THEME.info}15`,
+                border: `2px solid ${THEME.info}40`, fontSize: 32, color: THEME.info, margin: "0 auto",
+                display: "flex", alignItems: "center", justifyContent: "center",
+              }}>🔊</button>
+            </div>
+            {q.options.map((opt, i) => (
+              <button key={i} className="vm-btn" onClick={() => checkAnswer(opt)} disabled={answered} style={{
+                width: "100%", padding: 16, marginBottom: 10, borderRadius: 14, textAlign: "center",
+                background: !answered ? THEME.card : opt.correct ? `${THEME.success}15` : (selected === opt ? `${THEME.danger}15` : THEME.card),
+                border: `1.5px solid ${!answered ? THEME.border : opt.correct ? THEME.success : (selected === opt ? THEME.danger : THEME.border)}`,
+                color: THEME.text, fontSize: 17, fontWeight: 600,
+              }}>
+                {opt.text}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {/* Matching */}
+        {q.type === "match" && <MatchingQuiz question={q} answered={answered} onAnswer={(correct) => {
+          setAnswered(true);
+          if (correct) setScore(s => s + 1);
+        }} />}
+
+        {answered && (
+          <button className="vm-btn" onClick={nextQuestion} style={{
+            width: "100%", padding: 16, marginTop: 16, borderRadius: 14, background: THEME.gradient1, color: "#fff", fontSize: 16,
+          }}>
+            {qIdx + 1 >= questions.length ? "See Results" : "Next Question →"}
+          </button>
+        )}
+      </div>
+    );
+  };
+
+  // Simple matching sub-component
+  const MatchingQuiz = ({ question, answered, onAnswer }) => {
+    const [pairs, setPairs] = useState([]);
+    const [selectedWord, setSelectedWord] = useState(null);
+    const [matched, setMatched] = useState({});
+    
+    useEffect(() => {
+      setPairs(question.words.map(w => ({ id: w.id, term: w.term, definition: w.definition })));
+      setMatched({});
+      setSelectedWord(null);
+    }, [question]);
+    
+    const shuffledDefs = useMemo(() => shuffleArray(pairs.map(p => ({ id: p.id, definition: p.definition }))), [pairs]);
+    
+    const handleWordClick = (wordId) => {
+      if (answered || matched[wordId]) return;
+      setSelectedWord(wordId);
+    };
+    
+    const handleDefClick = (defId) => {
+      if (answered || !selectedWord) return;
+      const newMatched = { ...matched, [selectedWord]: defId };
+      setMatched(newMatched);
+      setSelectedWord(null);
+      
+      if (Object.keys(newMatched).length === pairs.length) {
+        const allCorrect = Object.entries(newMatched).every(([wId, dId]) => wId === dId);
+        onAnswer(allCorrect);
+      }
+    };
+    
+    return (
+      <div style={{ animation: "vmFadeIn 0.3s ease" }}>
+        <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 16, color: THEME.textSecondary }}>Match words to definitions</div>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+          <div>
+            {pairs.map(p => (
+              <button key={p.id} className="vm-btn" onClick={() => handleWordClick(p.id)} style={{
+                width: "100%", padding: 12, marginBottom: 8, borderRadius: 10, fontSize: 14, fontWeight: 600,
+                background: matched[p.id] ? `${THEME.success}12` : (selectedWord === p.id ? `${THEME.accent}20` : THEME.card),
+                border: `1.5px solid ${matched[p.id] ? THEME.success : (selectedWord === p.id ? THEME.accent : THEME.border)}`,
+                color: THEME.text, opacity: matched[p.id] ? 0.6 : 1,
+              }}>{p.term}</button>
+            ))}
+          </div>
+          <div>
+            {shuffledDefs.map(d => {
+              const isMatched = Object.values(matched).includes(d.id);
+              return (
+                <button key={d.id} className="vm-btn" onClick={() => handleDefClick(d.id)} style={{
+                  width: "100%", padding: 12, marginBottom: 8, borderRadius: 10, fontSize: 12,
+                  background: isMatched ? `${THEME.success}12` : THEME.card,
+                  border: `1.5px solid ${isMatched ? THEME.success : THEME.border}`,
+                  color: THEME.textSecondary, textAlign: "left", lineHeight: 1.4,
+                  opacity: isMatched ? 0.6 : 1,
+                }}>{d.definition.slice(0, 50)}{d.definition.length > 50 ? "..." : ""}</button>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  // ── WORDS LIST SCREEN ───────────────────────────────────────
+  const WordsScreen = () => {
+    const [search, setSearch] = useState("");
+    const [filter, setFilter] = useState("all");
+    const [showImport, setShowImport] = useState(false);
+    const [importText, setImportText] = useState("");
+    const [showAdd, setShowAdd] = useState(false);
+    const [newWord, setNewWord] = useState({ term: "", definition: "", phonetic: "", partOfSpeech: "n", examples: "", synonyms: "", category: "custom" });
+    const [expandedId, setExpandedId] = useState(null);
+
+    const filtered = useMemo(() => {
+      let result = words;
+      if (search) result = result.filter(w => w.term.toLowerCase().includes(search.toLowerCase()) || w.definition.toLowerCase().includes(search.toLowerCase()));
+      if (filter !== "all") result = result.filter(w => w.category === filter);
+      return result;
+    }, [words, search, filter]);
+
+    const handleImport = () => {
+      const lines = importText.split("\n").filter(l => l.trim() && !l.startsWith("#"));
+      const newWords = lines.map((line, i) => {
+        const parts = line.split("|").map(p => p.trim());
+        if (parts.length < 2) return null;
+        return {
+          id: `imp_${Date.now()}_${i}`,
+          term: parts[0],
+          definition: parts[1],
+          phonetic: parts[2] || "",
+          partOfSpeech: parts[3] || "n",
+          examples: parts[4] ? parts[4].split(";").map(e => e.trim()) : [],
+          synonyms: parts[5] ? parts[5].split(",").map(s => s.trim()) : [],
+          category: parts[6] || "custom",
+          srs: {},
+        };
+      }).filter(Boolean);
+      
+      if (newWords.length > 0) {
+        setWords(prev => [...prev, ...newWords]);
+        showToast(`Imported ${newWords.length} words!`);
+        setShowImport(false);
+        setImportText("");
+      }
+    };
+
+    const handleAddWord = () => {
+      if (!newWord.term.trim() || !newWord.definition.trim()) return;
+      const word = {
+        id: `w_${Date.now()}`,
+        ...newWord,
+        examples: newWord.examples ? newWord.examples.split(";").map(e => e.trim()).filter(Boolean) : [],
+        synonyms: newWord.synonyms ? newWord.synonyms.split(",").map(s => s.trim()).filter(Boolean) : [],
+        srs: {},
+      };
+      setWords(prev => [...prev, word]);
+      showToast(`Added "${word.term}"`);
+      setShowAdd(false);
+      setNewWord({ term: "", definition: "", phonetic: "", partOfSpeech: "n", examples: "", synonyms: "", category: "custom" });
+    };
+
+    const deleteWord = (id) => {
+      setWords(prev => prev.filter(w => w.id !== id));
+      showToast("Word deleted", "warning");
+    };
+
+    // Import Modal
+    if (showImport) return (
+      <div style={{ padding: "20px 16px 100px", maxWidth: 480, margin: "0 auto", animation: "vmFadeIn 0.3s ease" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 20 }}>
+          <button className="vm-btn" onClick={() => setShowImport(false)} style={{ background: "none", color: THEME.textSecondary, fontSize: 22, padding: 4 }}>←</button>
+          <div style={{ fontSize: 20, fontWeight: 800 }}>Import Vocabulary</div>
+        </div>
+        
+        <div className="vm-card" style={{ padding: 16, marginBottom: 16 }}>
+          <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 8, color: THEME.accent }}>📋 Format Guide</div>
+          <div className="vm-mono" style={{ fontSize: 11, color: THEME.textSecondary, lineHeight: 1.8, padding: 12, borderRadius: 8, background: THEME.surface }}>
+            word | definition<br/>
+            word | definition | phonetic<br/>
+            word | definition | phonetic | pos | examples | synonyms | category
+          </div>
+        </div>
+        
+        <textarea className="vm-input" value={importText} onChange={e => setImportText(e.target.value)}
+          placeholder={"ubiquitous | present everywhere\nresilient | able to recover quickly\nleverage | use to maximum advantage"}
+          style={{ height: 240, resize: "vertical", fontFamily: "'JetBrains Mono', monospace", fontSize: 13, lineHeight: 1.7, marginBottom: 16 }}
+        />
+        
+        <div style={{ display: "flex", gap: 12 }}>
+          <button className="vm-btn" onClick={handleImport} disabled={!importText.trim()} style={{
+            flex: 1, padding: 16, borderRadius: 14, background: importText.trim() ? THEME.gradient1 : THEME.border,
+            color: "#fff", fontSize: 15, opacity: importText.trim() ? 1 : 0.5,
+          }}>Import {importText.split("\n").filter(l => l.trim() && !l.startsWith("#")).length} words</button>
+        </div>
+      </div>
+    );
+
+    // Add Word Modal
+    if (showAdd) return (
+      <div style={{ padding: "20px 16px 100px", maxWidth: 480, margin: "0 auto", animation: "vmFadeIn 0.3s ease" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 24 }}>
+          <button className="vm-btn" onClick={() => setShowAdd(false)} style={{ background: "none", color: THEME.textSecondary, fontSize: 22, padding: 4 }}>←</button>
+          <div style={{ fontSize: 20, fontWeight: 800 }}>Add New Word</div>
+        </div>
+        
+        {[
+          { key: "term", label: "Word *", placeholder: "e.g. ubiquitous" },
+          { key: "definition", label: "Definition *", placeholder: "e.g. present, appearing everywhere" },
+          { key: "phonetic", label: "Phonetic", placeholder: "e.g. /juːˈbɪkwɪtəs/" },
+          { key: "examples", label: "Examples (;separated)", placeholder: "e.g. It's ubiquitous today; Found everywhere" },
+          { key: "synonyms", label: "Synonyms (,separated)", placeholder: "e.g. omnipresent, pervasive" },
+        ].map(f => (
+          <div key={f.key} style={{ marginBottom: 14 }}>
+            <label style={{ fontSize: 12, fontWeight: 600, color: THEME.textSecondary, marginBottom: 6, display: "block" }}>{f.label}</label>
+            <input className="vm-input" value={newWord[f.key]} onChange={e => setNewWord(p => ({ ...p, [f.key]: e.target.value }))} placeholder={f.placeholder} />
+          </div>
+        ))}
+        
+        <div style={{ marginBottom: 14 }}>
+          <label style={{ fontSize: 12, fontWeight: 600, color: THEME.textSecondary, marginBottom: 6, display: "block" }}>Category</label>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+            {CATEGORIES.map(c => (
+              <button key={c.id} className="vm-btn" onClick={() => setNewWord(p => ({ ...p, category: c.id }))} style={{
+                padding: "6px 14px", borderRadius: 20, fontSize: 12, fontWeight: 600,
+                background: newWord.category === c.id ? `${c.color}20` : THEME.surface,
+                color: newWord.category === c.id ? c.color : THEME.textMuted,
+                border: `1.5px solid ${newWord.category === c.id ? c.color : THEME.border}`,
+              }}>{c.icon} {c.name}</button>
+            ))}
+          </div>
+        </div>
+        
+        <button className="vm-btn" onClick={handleAddWord} disabled={!newWord.term.trim() || !newWord.definition.trim()} style={{
+          width: "100%", padding: 16, marginTop: 8, borderRadius: 14,
+          background: (newWord.term.trim() && newWord.definition.trim()) ? THEME.gradient1 : THEME.border,
+          color: "#fff", fontSize: 16, opacity: (newWord.term.trim() && newWord.definition.trim()) ? 1 : 0.5,
+        }}>Add Word</button>
+      </div>
+    );
+
+    return (
+      <div style={{ padding: "20px 16px 100px", maxWidth: 480, margin: "0 auto", animation: "vmFadeIn 0.4s ease" }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 20 }}>
+          <div>
+            <div style={{ fontSize: 22, fontWeight: 800 }}>My Words</div>
+            <div style={{ fontSize: 13, color: THEME.textSecondary }}>{words.length} words total</div>
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button className="vm-btn" onClick={() => setShowImport(true)} style={{
+              padding: "8px 14px", borderRadius: 10, background: `${THEME.accent}15`, color: THEME.accent, fontSize: 13,
+            }}>📥 Import</button>
+            <button className="vm-btn" onClick={() => setShowAdd(true)} style={{
+              padding: "8px 14px", borderRadius: 10, background: THEME.gradient1, color: "#fff", fontSize: 13,
+            }}>+ Add</button>
+          </div>
+        </div>
+        
+        <input className="vm-input" value={search} onChange={e => setSearch(e.target.value)} placeholder="🔍 Search words..."
+          style={{ marginBottom: 12 }}
+        />
+        
+        <div style={{ display: "flex", gap: 6, overflowX: "auto", paddingBottom: 8, marginBottom: 16 }}>
+          <button className="vm-btn" onClick={() => setFilter("all")} style={{
+            padding: "6px 14px", borderRadius: 20, fontSize: 12, fontWeight: 600, whiteSpace: "nowrap",
+            background: filter === "all" ? `${THEME.accent}20` : THEME.surface,
+            color: filter === "all" ? THEME.accent : THEME.textMuted,
+          }}>All ({words.length})</button>
+          {CATEGORIES.filter(c => words.some(w => w.category === c.id)).map(c => (
+            <button key={c.id} className="vm-btn" onClick={() => setFilter(c.id)} style={{
+              padding: "6px 14px", borderRadius: 20, fontSize: 12, fontWeight: 600, whiteSpace: "nowrap",
+              background: filter === c.id ? `${c.color}20` : THEME.surface,
+              color: filter === c.id ? c.color : THEME.textMuted,
+            }}>{c.icon} {c.name}</button>
+          ))}
+        </div>
+        
+        <div>
+          {filtered.map(word => {
+            const mastery = SRSEngine.getMasteryLevel(word);
+            const m = MASTERY[mastery];
+            const expanded = expandedId === word.id;
+            return (
+              <div key={word.id} className="vm-card" style={{ marginBottom: 8, overflow: "hidden" }}>
+                <div onClick={() => setExpandedId(expanded ? null : word.id)} style={{
+                  padding: "14px 16px", display: "flex", alignItems: "center", gap: 12, cursor: "pointer",
+                }}>
+                  <div style={{ width: 4, height: 32, borderRadius: 2, background: m.color, flexShrink: 0 }} />
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <span style={{ fontWeight: 700, fontSize: 15 }}>{word.term}</span>
+                      <span className="vm-mono" style={{ fontSize: 11, color: THEME.textMuted }}>{word.phonetic}</span>
+                    </div>
+                    <div style={{ fontSize: 13, color: THEME.textSecondary, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {word.definition}
+                    </div>
+                  </div>
+                  <span style={{ fontSize: 16 }}>{m.icon}</span>
+                  <span style={{ color: THEME.textMuted, fontSize: 16, transform: expanded ? "rotate(180deg)" : "rotate(0deg)", transition: "transform 0.2s" }}>▾</span>
+                </div>
+                {expanded && (
+                  <div style={{ padding: "0 16px 14px", animation: "vmFadeIn 0.2s ease" }}>
+                    <div style={{ height: 1, background: THEME.border, marginBottom: 12 }} />
+                    {word.examples?.length > 0 && word.examples.map((ex, i) => (
+                      <div key={i} style={{ fontSize: 13, color: THEME.textSecondary, marginBottom: 4, fontStyle: "italic" }}>• "{ex}"</div>
+                    ))}
+                    {word.synonyms?.length > 0 && (
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginTop: 8 }}>
+                        {word.synonyms.map((s, i) => (
+                          <span key={i} className="vm-tag" style={{ background: `${THEME.success}12`, color: THEME.success, fontSize: 11 }}>{s}</span>
+                        ))}
+                      </div>
+                    )}
+                    <div style={{ display: "flex", gap: 8, marginTop: 12 }}>
+                      <button className="vm-btn" onClick={(e) => { e.stopPropagation(); speak(word.term); }} style={{
+                        padding: "6px 14px", borderRadius: 8, background: `${THEME.info}12`, color: THEME.info, fontSize: 12,
+                      }}>🔊 Play</button>
+                      <button className="vm-btn" onClick={(e) => { e.stopPropagation(); deleteWord(word.id); }} style={{
+                        padding: "6px 14px", borderRadius: 8, background: `${THEME.danger}12`, color: THEME.danger, fontSize: 12,
+                      }}>🗑 Delete</button>
+                      <div style={{ flex: 1 }} />
+                      <span style={{ fontSize: 11, color: THEME.textMuted, alignSelf: "center" }}>
+                        Next: {formatDate(word.srs?.nextReview)}
+                      </span>
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+          {filtered.length === 0 && (
+            <div style={{ textAlign: "center", padding: 40, color: THEME.textMuted }}>
+              <div style={{ fontSize: 40, marginBottom: 12 }}>📚</div>
+              <div>No words found</div>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  };
+
+  // ── PROFILE/STATS SCREEN ────────────────────────────────────
+  const ProfileScreen = () => {
+    const weeklyData = useMemo(() => {
+      const days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+      return days.map((d, i) => ({ day: d, reviews: Math.floor(Math.random() * 20) + (stats.todayReviews || 0) * (i === new Date().getDay() - 1 ? 1 : 0) }));
+    }, [stats]);
+    
+    const maxReviews = Math.max(...weeklyData.map(d => d.reviews), 1);
+
+    return (
+      <div style={{ padding: "20px 16px 100px", maxWidth: 480, margin: "0 auto", animation: "vmFadeIn 0.4s ease" }}>
+        <div style={{ fontSize: 22, fontWeight: 800, marginBottom: 24 }}>Your Progress</div>
+        
+        {/* Stats Grid */}
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 24 }}>
+          <StatCard icon="📚" label="Total Words" value={words.length} color={THEME.accent} />
+          <StatCard icon="🔥" label="Streak" value={`${stats.streak}d`} color={THEME.danger} />
+          <StatCard icon="📊" label="Total Reviews" value={stats.totalReviews} color={THEME.success} />
+          <StatCard icon="⚡" label="XP" value={stats.xp} color={THEME.warning} />
+        </div>
+        
+        {/* Weekly Chart */}
+        <div className="vm-card" style={{ padding: 20, marginBottom: 20 }}>
+          <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 16 }}>📊 This Week</div>
+          <div style={{ display: "flex", alignItems: "flex-end", gap: 8, height: 120 }}>
+            {weeklyData.map((d, i) => (
+              <div key={i} style={{ flex: 1, textAlign: "center" }}>
+                <div style={{
+                  height: `${Math.max((d.reviews / maxReviews) * 100, 4)}%`,
+                  background: d.reviews > 0 ? THEME.gradient1 : THEME.border,
+                  borderRadius: "6px 6px 0 0",
+                  transition: "height 0.5s ease",
+                  minHeight: 4,
+                  position: "relative",
+                }}>
+                  {d.reviews > 0 && (
+                    <div style={{ position: "absolute", top: -18, left: "50%", transform: "translateX(-50%)", fontSize: 10, fontWeight: 700, color: THEME.accent }}>
+                      {d.reviews}
+                    </div>
+                  )}
+                </div>
+                <div style={{ fontSize: 10, color: THEME.textMuted, marginTop: 6, fontWeight: 600 }}>{d.day}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+        
+        {/* Mastery Breakdown */}
+        <div className="vm-card" style={{ padding: 20, marginBottom: 20 }}>
+          <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 14 }}>Mastery Breakdown</div>
+          {MASTERY.map((m, i) => (
+            <div key={i} style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 10 }}>
+              <span style={{ fontSize: 18, width: 28, textAlign: "center" }}>{m.icon}</span>
+              <span style={{ fontSize: 13, fontWeight: 600, width: 80, color: m.color }}>{m.name}</span>
+              <div style={{ flex: 1, height: 8, borderRadius: 4, background: THEME.surface, overflow: "hidden" }}>
+                <div style={{
+                  height: "100%", width: `${words.length > 0 ? (masteryDist[i] / words.length) * 100 : 0}%`,
+                  background: m.color, borderRadius: 4, transition: "width 0.5s ease",
+                }} />
+              </div>
+              <span className="vm-mono" style={{ fontSize: 12, color: THEME.textMuted, width: 28, textAlign: "right" }}>{masteryDist[i]}</span>
+            </div>
+          ))}
+        </div>
+        
+        {/* Achievements */}
+        <div className="vm-card" style={{ padding: 20 }}>
+          <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 14 }}>
+            🏆 Achievements ({unlockedAchievements.length}/{ACHIEVEMENTS.length})
+          </div>
+          {ACHIEVEMENTS.map(a => {
+            const unlocked = a.condition({ ...stats, totalWords: words.length });
+            return (
+              <div key={a.id} style={{
+                display: "flex", alignItems: "center", gap: 12, padding: "10px 0",
+                borderBottom: `1px solid ${THEME.border}15`, opacity: unlocked ? 1 : 0.35,
+              }}>
+                <span style={{ fontSize: 28 }}>{a.icon}</span>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: unlocked ? THEME.text : THEME.textMuted }}>{a.name}</div>
+                  <div style={{ fontSize: 12, color: THEME.textMuted }}>{a.desc}</div>
+                </div>
+                {unlocked && <span style={{ color: THEME.success, fontSize: 18 }}>✓</span>}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    );
+  };
+
+  // ── RENDER ──────────────────────────────────────────────────
+  const screens = {
+    home: HomeScreen,
+    learn: LearnScreen,
+    review: ReviewScreen,
+    quiz: QuizScreen,
+    words: WordsScreen,
+    profile: ProfileScreen,
+  };
+  const CurrentScreen = screens[screen] || HomeScreen;
+
+  return (
+    <div className="vm-app" style={{ position: "relative", minHeight: "100vh", paddingBottom: 80 }}>
+      {/* Background ambience */}
+      <div style={{
+        position: "fixed", top: 0, left: 0, right: 0, bottom: 0, pointerEvents: "none", zIndex: 0,
+        background: `radial-gradient(ellipse at 20% 20%, ${THEME.accent}06 0%, transparent 60%), 
+                      radial-gradient(ellipse at 80% 80%, ${THEME.success}04 0%, transparent 60%)`,
+      }} />
+      
+      {/* Content */}
+      <div style={{ position: "relative", zIndex: 1 }}>
+        <CurrentScreen />
+      </div>
+      
+      {/* Toast */}
+      {toast && (
+        <div style={{
+          position: "fixed", top: 24, left: "50%", transform: "translateX(-50%)",
+          background: toast.type === "success" ? THEME.success : toast.type === "warning" ? THEME.warning : THEME.danger,
+          color: "#fff", padding: "10px 24px", borderRadius: 12, fontWeight: 600, fontSize: 14,
+          zIndex: 1000, animation: "vmSlideUp 0.3s ease",
+          boxShadow: `0 8px 32px ${toast.type === "success" ? THEME.successGlow : THEME.dangerGlow}`,
+        }}>
+          {toast.msg}
+        </div>
+      )}
+      
+      {/* Bottom Navigation */}
+      <div style={{
+        position: "fixed", bottom: 0, left: 0, right: 0, zIndex: 100,
+        background: "rgba(10,10,15,0.92)", backdropFilter: "blur(20px)", WebkitBackdropFilter: "blur(20px)",
+        borderTop: `1px solid ${THEME.border}`,
+        display: "flex", justifyContent: "center", padding: "8px 16px 12px",
+      }}>
+        <div style={{ display: "flex", gap: 4, maxWidth: 480, width: "100%", justifyContent: "space-around" }}>
+          {[
+            { id: "home", icon: "🏠", label: "Home" },
+            { id: "learn", icon: "🧠", label: "Learn" },
+            { id: "review", icon: "🔄", label: "Review" },
+            { id: "quiz", icon: "❓", label: "Quiz" },
+            { id: "words", icon: "📚", label: "Words" },
+            { id: "profile", icon: "📊", label: "Stats" },
+          ].map(nav => (
+            <div key={nav.id} className={`vm-nav-item ${screen === nav.id ? "active" : ""}`} onClick={() => setScreen(nav.id)}>
+              <span className="nav-icon">{nav.icon}</span>
+              <span>{nav.label}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
