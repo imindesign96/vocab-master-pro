@@ -1150,6 +1150,7 @@ export default function VocabMasterPro() {
     const [quizDone, setQuizDone] = useState(false);
     const [spellingInput, setSpellingInput] = useState("");
     const spellingRef = useRef(null);
+    const processingRef = useRef(false); // Prevent double execution
 
     const generateQuiz = (type) => {
       setQuizType(type);
@@ -1203,29 +1204,57 @@ export default function VocabMasterPro() {
     };
 
     const checkAnswer = (answer) => {
-      if (answered) return;
+      // Prevent double execution
+      if (answered || processingRef.current) {
+        console.log("⚠️ Blocked duplicate call");
+        return;
+      }
+
+      processingRef.current = true;
+      console.log("✅ checkAnswer called", { answer, answered });
+
       setSelected(answer);
       setAnswered(true);
-      
+      console.log("✅ answered set to true");
+
       const q = questions[qIdx];
       let correct = false;
-      
+
       if (q.type === "mc" || q.type === "listen") correct = answer.correct;
       else if (q.type === "tf") correct = answer === q.isTrue;
       else if (q.type === "fill" || q.type === "spell") {
         correct = answer.toLowerCase().trim() === q.word.term.toLowerCase();
       }
-      
-      if (correct) {
-        setScore(s => s + 1);
-        updateWordSRS(q.word?.id || q.words?.[0]?.id, "good");
-      } else if (q.word) {
-        updateWordSRS(q.word.id, "again");
+
+      console.log("✅ Correct?", correct, "Word ID:", q.word?.id);
+
+      try {
+        if (correct) {
+          setScore(s => s + 1);
+          if (q.word?.id || q.words?.[0]?.id) {
+            updateWordSRS(q.word?.id || q.words?.[0]?.id, "good");
+          }
+        } else if (q.word?.id) {
+          updateWordSRS(q.word.id, "again");
+        }
+      } catch (error) {
+        console.error("❌ Error updating SRS:", error);
       }
+
+      console.log("✅ checkAnswer completed");
+
+      // Scroll to show Continue button
+      setTimeout(() => {
+        window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
+      }, 100);
     };
 
     const nextQuestion = () => {
+      console.log("🔄 nextQuestion called");
+      processingRef.current = false; // Reset for next question
+
       if (qIdx + 1 >= questions.length) {
+        console.log("🏁 Quiz complete!");
         setQuizDone(true);
         const total = questions.length;
         if (score + (answered && selected?.correct ? 1 : 0) === total) {
@@ -1233,6 +1262,7 @@ export default function VocabMasterPro() {
         }
         setStats(p => ({ ...p, totalQuizzes: (p.totalQuizzes || 0) + 1 }));
       } else {
+        console.log("➡️ Moving to next question");
         setQIdx(q => q + 1);
         setSelected(null);
         setAnswered(false);
@@ -1449,11 +1479,23 @@ export default function VocabMasterPro() {
         }} />}
 
         {answered && (
-          <button className="vm-btn" onClick={nextQuestion} style={{
-            width: "100%", padding: 16, marginTop: 16, borderRadius: 14, background: THEME.gradient1, color: "#fff", fontSize: 16,
-          }}>
-            {qIdx + 1 >= questions.length ? "See Results" : "Next Question →"}
-          </button>
+          <div style={{ marginTop: 24, marginBottom: 40, animation: "vmBounceIn 0.5s ease" }}>
+            <div style={{
+              padding: 16, borderRadius: 12, marginBottom: 16, textAlign: "center",
+              background: THEME.success + "15", border: `2px solid ${THEME.success}`,
+            }}>
+              <div style={{ fontSize: 40, marginBottom: 8 }}>✅</div>
+              <div style={{ fontSize: 18, fontWeight: 700, color: THEME.success }}>
+                Answered! Tap Continue below
+              </div>
+            </div>
+            <button className="vm-btn" onClick={nextQuestion} style={{
+              width: "100%", padding: 20, borderRadius: 14, background: THEME.gradient1, color: "#fff", fontSize: 18, fontWeight: 700,
+              boxShadow: "0 8px 24px rgba(108,92,231,0.5)",
+            }}>
+              {qIdx + 1 >= questions.length ? "📊 See Results" : "Continue →"}
+            </button>
+          </div>
         )}
       </div>
     );
