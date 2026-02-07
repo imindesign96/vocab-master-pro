@@ -744,13 +744,14 @@ export default function VocabMasterPro() {
 
   // ── LEARN SCREEN (Active Recall) ────────────────────────────
   const LearnScreen = () => {
-    const [mode, setMode] = useState(null); // null = select mode
+    const [mode, setMode] = useState(null);
     const [queue, setQueue] = useState([]);
     const [idx, setIdx] = useState(0);
-    const [phase, setPhase] = useState("think"); // think, reveal, done
+    const [phase, setPhase] = useState("think");
     const [typedAnswer, setTypedAnswer] = useState("");
     const [isCorrect, setIsCorrect] = useState(null);
     const [sessionStats, setSessionStats] = useState({ correct: 0, incorrect: 0 });
+    const [sessionResults, setSessionResults] = useState([]);
     const inputRef = useRef(null);
 
     const startSession = (selectedMode) => {
@@ -760,6 +761,7 @@ export default function VocabMasterPro() {
       setIdx(0);
       setPhase("think");
       setSessionStats({ correct: 0, incorrect: 0 });
+      setSessionResults([]);
     };
 
     const currentWord = queue[idx];
@@ -767,13 +769,28 @@ export default function VocabMasterPro() {
 
     const handleRate = (rating) => {
       if (!currentWord) return;
-      updateWordSRS(currentWord.id, rating);
+
+      // Store result for batch SRS update
+      setSessionResults(prev => [...prev, {
+        wordId: currentWord.id,
+        rating
+      }]);
+
       const isGood = rating === "good" || rating === "easy";
       setSessionStats(p => ({
         correct: p.correct + (isGood ? 1 : 0),
         incorrect: p.incorrect + (isGood ? 0 : 1),
       }));
+
       if (idx + 1 >= queue.length) {
+        // Batch update SRS for all reviewed words
+        sessionResults.forEach(result => {
+          if (result.wordId) {
+            updateWordSRS(result.wordId, result.rating);
+          }
+        });
+        // Update current word
+        updateWordSRS(currentWord.id, rating);
         setPhase("done");
       } else {
         setIdx(i => i + 1);
@@ -1042,6 +1059,7 @@ export default function VocabMasterPro() {
     const [started, setStarted] = useState(false);
     const [sessionDone, setSessionDone] = useState(false);
     const [sessionStats, setSessionStats] = useState({ correct: 0, incorrect: 0 });
+    const [sessionResults, setSessionResults] = useState([]);
 
     const startReview = () => {
       const q = shuffleArray(dueWords.length > 0 ? dueWords : words).slice(0, 15);
@@ -1051,15 +1069,30 @@ export default function VocabMasterPro() {
       setStarted(true);
       setSessionDone(false);
       setSessionStats({ correct: 0, incorrect: 0 });
+      setSessionResults([]);
     };
 
     const handleRate = (rating) => {
       if (!queue[idx]) return;
-      updateWordSRS(queue[idx].id, rating);
+
+      // Store result for batch SRS update
+      setSessionResults(prev => [...prev, {
+        wordId: queue[idx].id,
+        rating
+      }]);
+
       const isGood = rating === "good" || rating === "easy";
       setSessionStats(p => ({ correct: p.correct + (isGood ? 1 : 0), incorrect: p.incorrect + (isGood ? 0 : 1) }));
-      
+
       if (idx + 1 >= queue.length) {
+        // Batch update SRS for all reviewed words
+        sessionResults.forEach(result => {
+          if (result.wordId) {
+            updateWordSRS(result.wordId, result.rating);
+          }
+        });
+        // Update current word
+        updateWordSRS(queue[idx].id, rating);
         setSessionDone(true);
       } else {
         setIdx(i => i + 1);
@@ -1146,10 +1179,11 @@ export default function VocabMasterPro() {
     const [qIdx, setQIdx] = useState(0);
     const [selected, setSelected] = useState(null);
     const [answered, setAnswered] = useState(false);
+    const [isCorrect, setIsCorrect] = useState(false);
     const [score, setScore] = useState(0);
     const [quizDone, setQuizDone] = useState(false);
     const [spellingInput, setSpellingInput] = useState("");
-    const [quizResults, setQuizResults] = useState([]); // Track results for SRS update
+    const [quizResults, setQuizResults] = useState([]);
     const spellingRef = useRef(null);
     const processingRef = useRef(false);
 
@@ -1221,6 +1255,7 @@ export default function VocabMasterPro() {
         correct = answer.toLowerCase().trim() === q.word.term.toLowerCase();
       }
 
+      setIsCorrect(correct);
       if (correct) setScore(s => s + 1);
 
       // Store result for batch SRS update later
@@ -1249,7 +1284,7 @@ export default function VocabMasterPro() {
 
         setQuizDone(true);
         const total = questions.length;
-        if (score + (answered && selected?.correct ? 1 : 0) === total) {
+        if (score + (answered && isCorrect ? 1 : 0) === total) {
           setStats(p => ({ ...p, perfectQuizzes: (p.perfectQuizzes || 0) + 1 }));
         }
         setStats(p => ({ ...p, totalQuizzes: (p.totalQuizzes || 0) + 1 }));
@@ -1257,6 +1292,7 @@ export default function VocabMasterPro() {
         setQIdx(q => q + 1);
         setSelected(null);
         setAnswered(false);
+        setIsCorrect(false);
         setSpellingInput("");
       }
     };
@@ -1468,6 +1504,7 @@ export default function VocabMasterPro() {
           if (processingRef.current) return;
           processingRef.current = true;
           setAnswered(true);
+          setIsCorrect(correct);
           if (correct) setScore(s => s + 1);
 
           // Store matching results for batch SRS update
@@ -1488,11 +1525,12 @@ export default function VocabMasterPro() {
           <div style={{ marginTop: 24, marginBottom: 40, animation: "vmBounceIn 0.5s ease" }}>
             <div style={{
               padding: 16, borderRadius: 12, marginBottom: 16, textAlign: "center",
-              background: THEME.success + "15", border: `2px solid ${THEME.success}`,
+              background: (isCorrect ? THEME.success : THEME.danger) + "15",
+              border: `2px solid ${isCorrect ? THEME.success : THEME.danger}`,
             }}>
-              <div style={{ fontSize: 40, marginBottom: 8 }}>✅</div>
-              <div style={{ fontSize: 18, fontWeight: 700, color: THEME.success }}>
-                Answered! Tap Continue below
+              <div style={{ fontSize: 40, marginBottom: 8 }}>{isCorrect ? "✅" : "❌"}</div>
+              <div style={{ fontSize: 18, fontWeight: 700, color: isCorrect ? THEME.success : THEME.danger }}>
+                {isCorrect ? "Correct!" : "Incorrect!"}
               </div>
             </div>
             <button className="vm-btn" onClick={nextQuestion} style={{
