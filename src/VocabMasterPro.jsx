@@ -1,4 +1,6 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
+import { getAllTOEICWords, TOEIC_LESSONS } from "./data/toeicVocab";
+import { exportData, importData, exportToCSV, autoBackup, getAvailableBackups, restoreBackup } from "./utils/dataManager";
 
 // ═══════════════════════════════════════════════════════════════
 // 🧠 VOCABMASTER PRO — Ultimate English Learning App
@@ -477,8 +479,16 @@ export default function VocabMasterPro() {
   const [words, setWords] = useState(() => {
     try {
       const saved = localStorage?.getItem?.("vm_words");
-      return saved ? JSON.parse(saved) : SAMPLE_WORDS;
-    } catch { return SAMPLE_WORDS; }
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        // If user has saved data, use it. Otherwise load TOEIC words
+        return parsed.length > 0 ? parsed : getAllTOEICWords();
+      }
+      // First time - load TOEIC vocabulary
+      return getAllTOEICWords();
+    } catch {
+      return getAllTOEICWords();
+    }
   });
   const [screen, setScreen] = useState("home");
   const [stats, setStats] = useState(() => {
@@ -500,6 +510,8 @@ export default function VocabMasterPro() {
     try {
       localStorage?.setItem?.("vm_words", JSON.stringify(words));
       localStorage?.setItem?.("vm_stats", JSON.stringify(stats));
+      // Auto-backup once per day
+      autoBackup(words, stats);
     } catch {}
   }, [words, stats]);
   
@@ -1839,6 +1851,220 @@ export default function VocabMasterPro() {
     );
   };
 
+  // ── SETTINGS/DATA SCREEN ────────────────────────────────────
+  const SettingsScreen = () => {
+    const fileInputRef = useRef(null);
+    const [backups, setBackups] = useState([]);
+
+    useEffect(() => {
+      setBackups(getAvailableBackups());
+    }, []);
+
+    const handleExportJSON = () => {
+      exportData(words, stats);
+      showToast("✅ Data exported successfully!", "success");
+    };
+
+    const handleExportCSV = () => {
+      exportToCSV(words);
+      showToast("✅ CSV exported successfully!", "success");
+    };
+
+    const handleImportClick = () => {
+      fileInputRef.current?.click();
+    };
+
+    const handleImportFile = async (e) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+
+      try {
+        const data = await importData(file);
+        setWords(data.words);
+        if (data.stats) setStats(prev => ({ ...prev, ...data.stats }));
+        showToast("✅ Data imported successfully!", "success");
+      } catch (error) {
+        showToast(`❌ ${error.message}`, "danger");
+      }
+      e.target.value = "";
+    };
+
+    const handleRestoreBackup = (backupKey) => {
+      try {
+        const data = restoreBackup(backupKey);
+        setWords(data.words);
+        setStats(prev => ({ ...prev, ...data.stats }));
+        showToast("✅ Backup restored!", "success");
+      } catch (error) {
+        showToast(`❌ ${error.message}`, "danger");
+      }
+    };
+
+    const handleLoadTOEIC = () => {
+      if (confirm("Load TOEIC vocabulary? This will replace your current words.")) {
+        setWords(getAllTOEICWords());
+        showToast("✅ TOEIC vocabulary loaded!", "success");
+      }
+    };
+
+    const handleResetData = () => {
+      if (confirm("⚠️ Reset all data? This cannot be undone!")) {
+        if (confirm("Are you absolutely sure? All progress will be lost!")) {
+          localStorage.clear();
+          setWords(getAllTOEICWords());
+          setStats({
+            streak: 0, lastStudyDate: null, totalReviews: 0, totalQuizzes: 0,
+            perfectQuizzes: 0, nightStudy: false, speedReview: false,
+            todayReviews: 0, todayDate: new Date().toDateString(), xp: 0,
+          });
+          showToast("🔄 Data reset complete", "success");
+        }
+      }
+    };
+
+    return (
+      <div style={{ padding: "20px 16px 100px", maxWidth: 480, margin: "0 auto", animation: "vmFadeIn 0.4s ease" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 28 }}>
+          <button className="vm-btn" onClick={() => setScreen("home")} style={{ background: "none", color: THEME.textSecondary, fontSize: 22, padding: 4 }}>←</button>
+          <div style={{ fontSize: 22, fontWeight: 800 }}>Settings & Data</div>
+        </div>
+
+        {/* Data Management */}
+        <div className="vm-card" style={{ padding: 20, marginBottom: 16 }}>
+          <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 16, display: "flex", alignItems: "center", gap: 8 }}>
+            💾 <span>Data Management</span>
+          </div>
+
+          <button className="vm-btn" onClick={handleExportJSON} style={{
+            width: "100%", padding: 14, marginBottom: 10, borderRadius: 12,
+            background: `${THEME.accent}15`, color: THEME.accent, fontSize: 14,
+            border: `1.5px solid ${THEME.accent}30`, textAlign: "left", display: "flex",
+            alignItems: "center", gap: 10,
+          }}>
+            <span style={{ fontSize: 20 }}>📥</span>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontWeight: 700 }}>Export JSON</div>
+              <div style={{ fontSize: 11, opacity: 0.8 }}>Backup all data (words + progress)</div>
+            </div>
+          </button>
+
+          <button className="vm-btn" onClick={handleExportCSV} style={{
+            width: "100%", padding: 14, marginBottom: 10, borderRadius: 12,
+            background: `${THEME.success}15`, color: THEME.success, fontSize: 14,
+            border: `1.5px solid ${THEME.success}30`, textAlign: "left", display: "flex",
+            alignItems: "center", gap: 10,
+          }}>
+            <span style={{ fontSize: 20 }}>📊</span>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontWeight: 700 }}>Export CSV</div>
+              <div style={{ fontSize: 11, opacity: 0.8 }}>Export words for Excel/Sheets</div>
+            </div>
+          </button>
+
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".json"
+            onChange={handleImportFile}
+            style={{ display: "none" }}
+          />
+
+          <button className="vm-btn" onClick={handleImportClick} style={{
+            width: "100%", padding: 14, borderRadius: 12,
+            background: `${THEME.info}15`, color: THEME.info, fontSize: 14,
+            border: `1.5px solid ${THEME.info}30`, textAlign: "left", display: "flex",
+            alignItems: "center", gap: 10,
+          }}>
+            <span style={{ fontSize: 20 }}>📤</span>
+            <div style={{ flex: 1 }}>
+              <div style={{ fontWeight: 700 }}>Import JSON</div>
+              <div style={{ fontSize: 11, opacity: 0.8 }}>Restore from backup file</div>
+            </div>
+          </button>
+        </div>
+
+        {/* TOEIC Lessons */}
+        <div className="vm-card" style={{ padding: 20, marginBottom: 16 }}>
+          <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 16, display: "flex", alignItems: "center", gap: 8 }}>
+            📚 <span>TOEIC Vocabulary</span>
+          </div>
+
+          <div style={{ marginBottom: 12 }}>
+            <div style={{ fontSize: 13, color: THEME.textSecondary, marginBottom: 8 }}>
+              Current: {words.length} words loaded
+            </div>
+            {TOEIC_LESSONS.map((lesson, idx) => (
+              <div key={lesson.id} style={{
+                padding: 12, marginBottom: 8, borderRadius: 10,
+                background: THEME.surface, border: `1px solid ${THEME.border}`,
+              }}>
+                <div style={{ fontSize: 14, fontWeight: 700, color: THEME.text }}>
+                  {lesson.title}
+                </div>
+                <div style={{ fontSize: 12, color: THEME.textMuted }}>
+                  {lesson.description} • {lesson.words.length} words
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <button className="vm-btn" onClick={handleLoadTOEIC} style={{
+            width: "100%", padding: 14, borderRadius: 12,
+            background: THEME.gradient1, color: "#fff", fontSize: 14,
+          }}>
+            🔄 Reload TOEIC Vocabulary
+          </button>
+        </div>
+
+        {/* Backups */}
+        {backups.length > 0 && (
+          <div className="vm-card" style={{ padding: 20, marginBottom: 16 }}>
+            <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 16, display: "flex", alignItems: "center", gap: 8 }}>
+              ⏰ <span>Auto Backups ({backups.length})</span>
+            </div>
+
+            {backups.slice(0, 3).map(backup => (
+              <div key={backup.key} style={{
+                padding: 12, marginBottom: 8, borderRadius: 10,
+                background: THEME.surface, display: "flex", justifyContent: "space-between",
+                alignItems: "center",
+              }}>
+                <div>
+                  <div style={{ fontSize: 13, fontWeight: 600, color: THEME.text }}>
+                    {backup.date}
+                  </div>
+                  <div style={{ fontSize: 11, color: THEME.textMuted }}>
+                    {backup.wordCount} words
+                  </div>
+                </div>
+                <button className="vm-btn" onClick={() => handleRestoreBackup(backup.key)} style={{
+                  padding: "6px 14px", borderRadius: 8, background: `${THEME.success}15`,
+                  color: THEME.success, fontSize: 12,
+                }}>
+                  Restore
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* Danger Zone */}
+        <div className="vm-card" style={{ padding: 20, background: `${THEME.danger}08`, border: `1px solid ${THEME.danger}30` }}>
+          <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 12, color: THEME.danger }}>
+            ⚠️ Danger Zone
+          </div>
+          <button className="vm-btn" onClick={handleResetData} style={{
+            width: "100%", padding: 14, borderRadius: 12,
+            background: `${THEME.danger}20`, color: THEME.danger, fontSize: 14,
+            border: `1.5px solid ${THEME.danger}`,
+          }}>
+            🗑️ Reset All Data
+          </button>
+        </div>
+      </div>
+    );
+  };
+
   // ── RENDER ──────────────────────────────────────────────────
   const screens = {
     home: HomeScreen,
@@ -1847,6 +2073,7 @@ export default function VocabMasterPro() {
     quiz: QuizScreen,
     words: WordsScreen,
     profile: ProfileScreen,
+    settings: SettingsScreen,
   };
   const CurrentScreen = screens[screen] || HomeScreen;
 
@@ -1892,6 +2119,7 @@ export default function VocabMasterPro() {
             { id: "quiz", icon: "❓", label: "Quiz" },
             { id: "words", icon: "📚", label: "Words" },
             { id: "profile", icon: "📊", label: "Stats" },
+            { id: "settings", icon: "⚙️", label: "Settings" },
           ].map(nav => (
             <div key={nav.id} className={`vm-nav-item ${screen === nav.id ? "active" : ""}`} onClick={() => setScreen(nav.id)}>
               <span className="nav-icon">{nav.icon}</span>
