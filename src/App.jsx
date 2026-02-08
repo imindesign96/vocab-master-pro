@@ -1,7 +1,7 @@
-import VocabMasterPro from './VocabMasterPro'
+import VocabMasterProWithAuth from './VocabMasterProWithAuth'
 
 function App() {
-  return <VocabMasterPro />
+  return <VocabMasterProWithAuth />
 }
 
 export default App

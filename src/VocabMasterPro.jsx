@@ -67,25 +67,42 @@ const ACHIEVEMENTS = [
 
 // ── SM-2 SPACED REPETITION ENGINE ─────────────────────────────
 const SRSEngine = {
+  // Optimized intervals for language learning: 1d → 3d → 7d → 14d → 30d → 60d
+  INTERVALS: [1, 3, 7, 14, 30, 60],
+
   processReview(word, quality) {
     // quality: 0-5 (0=blackout, 5=perfect)
     let { easeFactor = 2.5, interval = 0, repetitions = 0 } = word.srs || {};
-    
+
     if (quality >= 3) {
-      if (repetitions === 0) interval = 1;
-      else if (repetitions === 1) interval = 6;
-      else interval = Math.round(interval * easeFactor);
+      // Correct answer - advance to next interval
+      if (repetitions < SRSEngine.INTERVALS.length) {
+        interval = SRSEngine.INTERVALS[repetitions];
+      } else {
+        // After all intervals, word is mastered (stay at 60 days)
+        interval = 60;
+      }
       repetitions++;
     } else {
+      // Wrong answer - reset to beginning
       repetitions = 0;
       interval = 1;
     }
-    
+
+    // Adjust ease factor based on quality (SM-2 algorithm)
     easeFactor = Math.max(1.3, easeFactor + (0.1 - (5 - quality) * (0.08 + (5 - quality) * 0.02)));
-    
+
     const nextReview = new Date();
     nextReview.setDate(nextReview.getDate() + interval);
-    
+
+    // Mark as mastered if reached final interval
+    const mastered = repetitions >= SRSEngine.INTERVALS.length;
+
+    // Track correct/wrong reviews for weak areas analysis
+    const isCorrect = quality >= 3;
+    const correctReviews = (word.srs?.correctReviews || 0) + (isCorrect ? 1 : 0);
+    const wrongReviews = (word.srs?.wrongReviews || 0) + (isCorrect ? 0 : 1);
+
     return {
       ...word.srs,
       easeFactor,
@@ -94,6 +111,9 @@ const SRSEngine = {
       nextReview: nextReview.toISOString(),
       lastReview: new Date().toISOString(),
       totalReviews: (word.srs?.totalReviews || 0) + 1,
+      correctReviews,
+      wrongReviews,
+      mastered,
     };
   },
 
@@ -115,8 +135,18 @@ const SRSEngine = {
   },
 
   isDueForReview(word) {
+    // Mastered words don't need review
+    if (word.srs?.mastered) return false;
     if (!word.srs?.nextReview) return true;
     return new Date(word.srs.nextReview) <= new Date();
+  },
+
+  // Get predicted next interval based on current progress
+  getNextInterval(word, quality) {
+    const reps = word.srs?.repetitions || 0;
+    if (quality < 3) return 1; // Reset
+    if (reps >= SRSEngine.INTERVALS.length) return 60; // Already mastered
+    return SRSEngine.INTERVALS[reps];
   },
 
   qualityFromRating(rating) {
@@ -162,6 +192,34 @@ const shuffleArray = (arr) => {
     [a[i], a[j]] = [a[j], a[i]];
   }
   return a;
+};
+
+// Smart word selection: prioritize due words, then least reviewed
+const selectWordsForReview = (allWords, dueWords, limit) => {
+  if (dueWords.length >= limit) {
+    // Enough due words - just shuffle and take
+    return shuffleArray(dueWords).slice(0, limit);
+  }
+
+  // Not enough due words - add least reviewed words
+  const selected = [...dueWords];
+  const remaining = limit - selected.length;
+
+  if (remaining > 0) {
+    // Filter out due words and mastered words, then sort by least reviewed
+    const notDue = allWords
+      .filter(w => !dueWords.includes(w) && !w.srs?.mastered)
+      .sort((a, b) => {
+        const aReps = a.srs?.repetitions || 0;
+        const bReps = b.srs?.repetitions || 0;
+        if (aReps !== bReps) return aReps - bReps; // Fewer reps first
+        return (a.srs?.totalReviews || 0) - (b.srs?.totalReviews || 0); // Fewer reviews first
+      });
+
+    selected.push(...notDue.slice(0, remaining));
+  }
+
+  return shuffleArray(selected);
 };
 
 const speak = (text, rate = 0.85) => {
@@ -309,10 +367,26 @@ const injectStyles = () => {
       font-weight: 500;
       color: ${THEME.textMuted};
       min-width: 64px;
+      flex-shrink: 0;
     }
     .vm-nav-item:hover { color: ${THEME.textSecondary}; }
     .vm-nav-item.active { color: ${THEME.accent}; background: rgba(108,92,231,0.1); }
     .vm-nav-item .nav-icon { font-size: 22px; }
+
+    /* Mobile optimization - hide labels on small screens */
+    @media (max-width: 480px) {
+      .vm-nav-item {
+        min-width: 48px;
+        padding: 6px 8px;
+        gap: 2px;
+      }
+      .vm-nav-item .nav-label {
+        display: none;
+      }
+      .vm-nav-item .nav-icon {
+        font-size: 24px;
+      }
+    }
     
     .vm-streak-badge {
       animation: vmStreakFire 1.5s ease-in-out infinite;
@@ -371,26 +445,44 @@ const StatCard = ({ icon, label, value, color = THEME.accent, sub }) => (
   </div>
 );
 
-const RatingButtons = ({ onRate, showEasy = true }) => (
-  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-    {[
-      { key: "again", label: "Again", icon: "✕", color: THEME.danger, bg: THEME.dangerGlow, sub: "< 1d" },
-      { key: "hard", label: "Hard", icon: "⚡", color: THEME.warning, bg: THEME.warningGlow, sub: "1-2d" },
-      { key: "good", label: "Good", icon: "✓", color: THEME.success, bg: THEME.successGlow, sub: "3-7d" },
-      ...(showEasy ? [{ key: "easy", label: "Easy", icon: "★", color: THEME.info, bg: "rgba(116,185,255,0.3)", sub: "7d+" }] : []),
-    ].map(({ key, label, icon, color, bg, sub }) => (
-      <button key={key} className="vm-btn" onClick={() => onRate(key)} style={{
-        flex: 1, minWidth: 70, padding: "14px 8px", borderRadius: 14,
-        background: bg, color, fontSize: 14, display: "flex", flexDirection: "column",
-        alignItems: "center", gap: 4, border: `1.5px solid ${color}30`,
-      }}>
-        <span style={{ fontSize: 20 }}>{icon}</span>
-        <span style={{ fontWeight: 700 }}>{label}</span>
-        <span style={{ fontSize: 10, opacity: 0.7 }}>{sub}</span>
-      </button>
-    ))}
-  </div>
-);
+const RatingButtons = ({ onRate, showEasy = true, word = null }) => {
+  // Calculate actual next intervals based on word's current progress
+  const getIntervalLabel = (rating) => {
+    if (!word) return { again: "< 1d", hard: "1d", good: "3d", easy: "7d" }[rating];
+
+    const quality = SRSEngine.qualityFromRating(rating);
+    const nextInterval = SRSEngine.getNextInterval(word, quality);
+
+    if (rating === "again") return "< 1d";
+    if (nextInterval >= 60) return "60d (Mastered!)";
+    return `${nextInterval}d`;
+  };
+
+  // Check if this is a new word (never reviewed before)
+  const isNewWord = !word?.srs?.repetitions || word.srs.repetitions === 0;
+
+  return (
+    <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+      {[
+        { key: "again", label: "Again", icon: "✕", color: THEME.danger, bg: THEME.dangerGlow },
+        { key: "hard", label: "Hard", icon: "⚡", color: THEME.warning, bg: THEME.warningGlow },
+        // Hide Good and Easy for new words (force 1-day review first)
+        ...(!isNewWord ? [{ key: "good", label: "Good", icon: "✓", color: THEME.success, bg: THEME.successGlow }] : []),
+        ...(!isNewWord && showEasy ? [{ key: "easy", label: "Easy", icon: "★", color: THEME.info, bg: "rgba(116,185,255,0.3)" }] : []),
+      ].map(({ key, label, icon, color, bg }) => (
+        <button key={key} className="vm-btn" onClick={() => onRate(key)} style={{
+          flex: 1, minWidth: 70, padding: "14px 8px", borderRadius: 14,
+          background: bg, color, fontSize: 14, display: "flex", flexDirection: "column",
+          alignItems: "center", gap: 4, border: `1.5px solid ${color}30`,
+        }}>
+          <span style={{ fontSize: 20 }}>{icon}</span>
+          <span style={{ fontWeight: 700 }}>{label}</span>
+          <span style={{ fontSize: 10, opacity: 0.7 }}>{getIntervalLabel(key)}</span>
+        </button>
+      ))}
+    </div>
+  );
+};
 
 const WordCard = ({ word, showDef, onFlip, compact }) => {
   const mastery = SRSEngine.getMasteryLevel(word);
@@ -474,46 +566,129 @@ const WordCard = ({ word, showDef, onFlip, compact }) => {
 };
 
 // ── MAIN APP ──────────────────────────────────────────────────
-export default function VocabMasterPro() {
+export default function VocabMasterPro({
+  userId = null,
+  userEmail = null,
+  userPhoto = null,
+  onSignOut = null,
+  firestoreService = null
+} = {}) {
+  // Ref to prevent save loop when syncing from Firestore
+  const isSyncingFromFirestore = useRef(false);
+
   // State
   const [words, setWords] = useState(() => {
+    // If using Firestore, start with empty array (will load from Firestore)
+    if (firestoreService) return [];
+
+    // Fallback to localStorage
     try {
       const saved = localStorage?.getItem?.("vm_words");
       if (saved) {
         const parsed = JSON.parse(saved);
-        // If user has saved data, use it. Otherwise load TOEIC words
         return parsed.length > 0 ? parsed : getAllTOEICWords();
       }
-      // First time - load TOEIC vocabulary
       return getAllTOEICWords();
     } catch {
       return getAllTOEICWords();
     }
   });
+
   const [screen, setScreen] = useState("home");
+
   const [stats, setStats] = useState(() => {
-    try {
-      const saved = localStorage?.getItem?.("vm_stats");
-      return saved ? JSON.parse(saved) : {
+    // If using Firestore, start with empty stats (will load from Firestore)
+    if (firestoreService) {
+      return {
         streak: 0, lastStudyDate: null, totalReviews: 0, totalQuizzes: 0,
         perfectQuizzes: 0, nightStudy: false, speedReview: false, todayReviews: 0,
-        todayDate: new Date().toDateString(), xp: 0,
+        todayDate: new Date().toDateString(), xp: 0, dailyGoal: 20,
+      };
+    }
+
+    // Fallback to localStorage
+    try {
+      const saved = localStorage?.getItem?.("vm_stats");
+      return saved ? { dailyGoal: 20, ...JSON.parse(saved) } : {
+        streak: 0, lastStudyDate: null, totalReviews: 0, totalQuizzes: 0,
+        perfectQuizzes: 0, nightStudy: false, speedReview: false, todayReviews: 0,
+        todayDate: new Date().toDateString(), xp: 0, dailyGoal: 20,
       };
     } catch {
-      return { streak: 0, lastStudyDate: null, totalReviews: 0, totalQuizzes: 0, perfectQuizzes: 0, nightStudy: false, speedReview: false, todayReviews: 0, todayDate: new Date().toDateString(), xp: 0 };
+      return { streak: 0, lastStudyDate: null, totalReviews: 0, totalQuizzes: 0, perfectQuizzes: 0, nightStudy: false, speedReview: false, todayReviews: 0, todayDate: new Date().toDateString(), xp: 0, dailyGoal: 20 };
     }
   });
+
   const [toast, setToast] = useState(null);
-  
-  // Persist
+
+  // Firestore realtime sync
   useEffect(() => {
-    try {
-      localStorage?.setItem?.("vm_words", JSON.stringify(words));
-      localStorage?.setItem?.("vm_stats", JSON.stringify(stats));
-      // Auto-backup once per day
-      autoBackup(words, stats);
-    } catch {}
-  }, [words, stats]);
+    if (!firestoreService || !userId) return;
+
+    console.log('🔄 Setting up Firestore realtime sync...');
+
+    // Subscribe to words
+    const unsubscribeWords = firestoreService.subscribeToWords((firestoreWords) => {
+      isSyncingFromFirestore.current = true; // Set flag before updating state
+
+      if (firestoreWords.length > 0) {
+        console.log(`✅ Synced ${firestoreWords.length} words from Firestore`);
+        setWords(firestoreWords);
+      } else {
+        // No words in Firestore, start empty
+        console.log('📭 No words in Firestore');
+        setWords([]);
+      }
+
+      setTimeout(() => {
+        isSyncingFromFirestore.current = false; // Reset flag after state update
+      }, 100);
+    });
+
+    // Subscribe to stats
+    const unsubscribeStats = firestoreService.subscribeToStats((firestoreStats) => {
+      if (Object.keys(firestoreStats).length > 0) {
+        isSyncingFromFirestore.current = true;
+        console.log('✅ Synced stats from Firestore');
+        setStats(firestoreStats);
+        setTimeout(() => {
+          isSyncingFromFirestore.current = false;
+        }, 100);
+      }
+    });
+
+    return () => {
+      unsubscribeWords();
+      unsubscribeStats();
+    };
+  }, [firestoreService, userId]);
+
+  // Persist to Firestore or localStorage
+  useEffect(() => {
+    if (firestoreService && userId) {
+      // Skip if currently syncing from Firestore (prevent loop)
+      if (isSyncingFromFirestore.current) {
+        console.log('⏭️ Skipping save - syncing from Firestore');
+        return;
+      }
+
+      // Save stats to Firestore (debounced)
+      // Words are saved individually in updateWordSRS
+      const timeoutId = setTimeout(() => {
+        console.log('💾 Saving stats to Firestore...');
+        firestoreService.saveStats(stats);
+      }, 2000); // Debounce 2s
+
+      return () => clearTimeout(timeoutId);
+    } else {
+      // Fallback to localStorage
+      try {
+        localStorage?.setItem?.("vm_words", JSON.stringify(words));
+        localStorage?.setItem?.("vm_stats", JSON.stringify(stats));
+        autoBackup(words, stats);
+      } catch {}
+    }
+  }, [stats, firestoreService, userId, words]);
   
   // Inject styles on mount
   useEffect(() => { injectStyles(); }, []);
@@ -551,15 +726,32 @@ export default function VocabMasterPro() {
     const quality = SRSEngine.qualityFromRating(rating);
     setWords(prev => prev.map(w => {
       if (w.id !== wordId) return w;
-      return { ...w, srs: SRSEngine.processReview(w, quality) };
+      const updated = { ...w, srs: SRSEngine.processReview(w, quality) };
+
+      // Save to Firestore if available
+      if (firestoreService && userId) {
+        firestoreService.saveWord(updated);
+      }
+
+      return updated;
     }));
     updateStreak();
-    setStats(prev => ({
-      ...prev,
-      totalReviews: prev.totalReviews + 1,
-      xp: prev.xp + (quality >= 4 ? 15 : quality >= 3 ? 10 : 5),
-    }));
-  }, [updateStreak]);
+    setStats(prev => {
+      const newTodayReviews = (prev.todayDate === new Date().toDateString() ? prev.todayReviews : 0) + 1;
+      const dailyGoal = prev.dailyGoal || 20;
+
+      // Check if goal just reached
+      if (newTodayReviews === dailyGoal) {
+        setTimeout(() => showToast(`🎉 Daily goal reached! ${dailyGoal} reviews completed!`, "success"), 300);
+      }
+
+      return {
+        ...prev,
+        totalReviews: prev.totalReviews + 1,
+        xp: prev.xp + (quality >= 4 ? 15 : quality >= 3 ? 10 : 5),
+      };
+    });
+  }, [updateStreak, firestoreService, userId, showToast]);
   
   // Computed
   const dueWords = useMemo(() => words.filter(w => SRSEngine.isDueForReview(w)), [words]);
@@ -568,7 +760,7 @@ export default function VocabMasterPro() {
     words.forEach(w => dist[SRSEngine.getMasteryLevel(w)]++);
     return dist;
   }, [words]);
-  const todayProgress = Math.min(1, (stats.todayReviews || 0) / 20);
+  const todayProgress = Math.min(1, (stats.todayReviews || 0) / (stats.dailyGoal || 20));
   const unlockedAchievements = useMemo(() =>
     ACHIEVEMENTS.filter(a => a.condition({ ...stats, totalWords: words.length })),
     [stats, words.length]
@@ -612,7 +804,7 @@ export default function VocabMasterPro() {
           <div style={{ flex: 1 }}>
             <div style={{ fontSize: 13, color: THEME.textSecondary, fontWeight: 500 }}>Today's Goal</div>
             <div style={{ fontSize: 24, fontWeight: 800 }}>
-              {stats.todayReviews || 0}<span style={{ fontSize: 14, color: THEME.textMuted }}> / 20 reviews</span>
+              {stats.todayReviews || 0}<span style={{ fontSize: 14, color: THEME.textMuted }}> / {stats.dailyGoal || 20} reviews</span>
             </div>
             <div style={{ fontSize: 12, color: THEME.accent, fontWeight: 600 }}>
               {stats.xp} XP earned
@@ -753,15 +945,45 @@ export default function VocabMasterPro() {
     const [sessionStats, setSessionStats] = useState({ correct: 0, incorrect: 0 });
     const [sessionResults, setSessionResults] = useState([]);
     const inputRef = useRef(null);
+    // Sentence Builder state
+    const [sentenceWords, setSentenceWords] = useState([]);
+    const [userSentence, setUserSentence] = useState([]);
+    const [correctSentence, setCorrectSentence] = useState([]);
 
     const startSession = (selectedMode) => {
       setMode(selectedMode);
-      const selected = shuffleArray(dueWords.length > 0 ? dueWords : words).slice(0, 10);
+      // Smart selection: prioritize due words, then least reviewed (up to 50)
+      const selected = selectWordsForReview(words, dueWords, 50);
       setQueue(selected);
       setIdx(0);
       setPhase("think");
       setSessionStats({ correct: 0, incorrect: 0 });
       setSessionResults([]);
+      setTypedAnswer("");
+      setIsCorrect(null);
+      setUserSentence([]);
+    };
+
+    const generateSentence = (word) => {
+      // Generate simple sentence templates
+      const templates = [
+        `The ${word.term} is very important`,
+        `I need to ${word.term} this task`,
+        `This is a good ${word.term}`,
+        `We should ${word.term} carefully`,
+        `The ${word.term} was successful`,
+      ];
+
+      // Use first example if available, otherwise use template
+      let sentence = word.examples?.[0] || templates[Math.floor(Math.random() * templates.length)];
+
+      // Split into words
+      const words = sentence.replace(/[.,!?]/g, '').split(' ');
+
+      // Shuffle words
+      const shuffled = [...words].sort(() => Math.random() - 0.5);
+
+      return { correct: words, shuffled };
     };
 
     const currentWord = queue[idx];
@@ -807,6 +1029,26 @@ export default function VocabMasterPro() {
       setPhase("reveal");
     };
 
+    // Empty state - no words available
+    if (words.length === 0) {
+      return (
+        <div style={{ padding: "40px 16px 100px", maxWidth: 480, margin: "0 auto", textAlign: "center", animation: "vmFadeIn 0.4s ease" }}>
+          <button className="vm-btn" onClick={() => setScreen("home")} style={{ position: "absolute", top: 20, left: 16, background: "none", color: THEME.textSecondary, fontSize: 22, padding: 4 }}>←</button>
+          <div style={{ fontSize: 64, marginBottom: 24 }}>📚</div>
+          <div style={{ fontSize: 24, fontWeight: 800, marginBottom: 12 }}>No Vocabulary Yet</div>
+          <div style={{ fontSize: 15, color: THEME.textSecondary, marginBottom: 32, lineHeight: 1.6 }}>
+            You haven't added any words yet.<br/>
+            Go to <strong style={{ color: THEME.accent }}>Words</strong> tab to import or add vocabulary.
+          </div>
+          <button className="vm-btn" onClick={() => setScreen("words")} style={{
+            padding: "14px 32px", borderRadius: 14, background: THEME.gradient1, color: "#fff", fontSize: 15
+          }}>
+            ➕ Add Words
+          </button>
+        </div>
+      );
+    }
+
     // Mode Select
     if (!mode) return (
       <div style={{ padding: "20px 16px 100px", maxWidth: 480, margin: "0 auto", animation: "vmFadeIn 0.4s ease" }}>
@@ -818,6 +1060,7 @@ export default function VocabMasterPro() {
         {[
           { id: "recall", icon: "🧠", name: "Active Recall", desc: "See word → Think → Reveal → Rate", rec: true, color: THEME.accent },
           { id: "type", icon: "⌨️", name: "Type Answer", desc: "See definition → Type the word → Check", color: THEME.success },
+          { id: "sentence", icon: "📝", name: "Sentence Builder", desc: "Build sentences using vocabulary words", color: THEME.warning },
           { id: "listen", icon: "👂", name: "Listening", desc: "Hear pronunciation → Recall meaning → Rate", color: THEME.info },
         ].map(m => (
           <button key={m.id} className="vm-btn vm-card" onClick={() => startSession(m.id)} style={{
@@ -929,7 +1172,7 @@ export default function VocabMasterPro() {
         
         {phase === "reveal" && (
           <div style={{ marginTop: 20, animation: "vmSlideUp 0.3s ease" }}>
-            <RatingButtons onRate={handleRate} />
+            <RatingButtons onRate={handleRate} word={currentWord} />
           </div>
         )}
       </div>
@@ -994,7 +1237,7 @@ export default function VocabMasterPro() {
                 </div>
               )}
             </div>
-            <RatingButtons onRate={handleRate} showEasy={isCorrect} />
+            <RatingButtons onRate={handleRate} showEasy={isCorrect} word={currentWord} />
           </div>
         )}
       </div>
@@ -1042,11 +1285,173 @@ export default function VocabMasterPro() {
         
         {phase === "reveal" && (
           <div style={{ animation: "vmSlideUp 0.3s ease" }}>
-            <RatingButtons onRate={handleRate} />
+            <RatingButtons onRate={handleRate} word={currentWord} />
           </div>
         )}
       </div>
     );
+
+    // Sentence Builder Mode
+    if (mode === "sentence") {
+      // Generate sentence on first render for this word
+      if (phase === "think" && userSentence.length === 0 && sentenceWords.length === 0) {
+        const { correct, shuffled } = generateSentence(currentWord);
+        setSentenceWords(shuffled);
+        setCorrectSentence(correct);
+      }
+
+      const checkSentence = () => {
+        const userText = userSentence.join(' ').toLowerCase().replace(/[.,!?]/g, '');
+        const correctText = correctSentence.join(' ').toLowerCase().replace(/[.,!?]/g, '');
+        const correct = userText === correctText;
+        setIsCorrect(correct);
+        setPhase("reveal");
+      };
+
+      return (
+        <div style={{ padding: "20px 16px 100px", maxWidth: 480, margin: "0 auto", animation: "vmFadeIn 0.3s ease" }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 20 }}>
+            <button className="vm-btn" onClick={() => { setMode(null); setUserSentence([]); setSentenceWords([]); }} style={{ background: "none", color: THEME.textSecondary, fontSize: 22, padding: 4 }}>←</button>
+            <div style={{ fontSize: 13, fontWeight: 600, color: THEME.textSecondary }}>{idx + 1} / {queue.length}</div>
+            <div className="vm-mono" style={{ fontSize: 12, color: THEME.warning }}>Sentence Builder</div>
+          </div>
+
+          <div style={{ height: 4, borderRadius: 2, background: THEME.border, marginBottom: 24, overflow: "hidden" }}>
+            <div style={{ height: "100%", width: `${((idx + (phase === "reveal" ? 1 : 0.5)) / queue.length) * 100}%`, background: `linear-gradient(90deg, ${THEME.warning}, ${THEME.accent})`, transition: "width 0.4s ease", borderRadius: 2 }} />
+          </div>
+
+          {/* Target Word */}
+          <div className="vm-card" style={{ padding: 20, marginBottom: 20, textAlign: "center", background: `${THEME.warning}08`, border: `1.5px solid ${THEME.warning}30` }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: THEME.warning, marginBottom: 8 }}>TARGET WORD</div>
+            <div style={{ fontSize: 28, fontWeight: 800, marginBottom: 8 }}>{currentWord.term}</div>
+            <div style={{ fontSize: 14, color: THEME.textSecondary }}>{currentWord.definition}</div>
+          </div>
+
+          {phase === "think" && (
+            <div style={{ animation: "vmFadeIn 0.3s ease" }}>
+              {/* User's Sentence Area */}
+              <div className="vm-card" style={{ padding: 16, marginBottom: 16, minHeight: 80, background: THEME.surface }}>
+                <div style={{ fontSize: 12, fontWeight: 700, color: THEME.accent, marginBottom: 12 }}>📝 YOUR SENTENCE</div>
+                <div style={{
+                  fontSize: 15, lineHeight: 1.8, minHeight: 40,
+                  display: "flex", flexWrap: "wrap", gap: 6
+                }}>
+                  {userSentence.length === 0 ? (
+                    <span style={{ color: THEME.textMuted, fontStyle: "italic" }}>Tap words below to build a sentence...</span>
+                  ) : (
+                    userSentence.map((word, i) => (
+                      <button
+                        key={i}
+                        className="vm-btn"
+                        onClick={() => {
+                          setUserSentence(prev => prev.filter((_, idx) => idx !== i));
+                          setSentenceWords(prev => [...prev, word]);
+                        }}
+                        style={{
+                          padding: "6px 12px", borderRadius: 8, fontSize: 14, fontWeight: 600,
+                          background: THEME.accent, color: "#fff",
+                          border: "none"
+                        }}
+                      >
+                        {word}
+                      </button>
+                    ))
+                  )}
+                </div>
+              </div>
+
+              {/* Word Bank */}
+              <div className="vm-card" style={{ padding: 16, marginBottom: 20 }}>
+                <div style={{ fontSize: 12, fontWeight: 700, color: THEME.textSecondary, marginBottom: 12 }}>💡 WORD BANK</div>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                  {sentenceWords.map((word, i) => (
+                    <button
+                      key={i}
+                      className="vm-btn"
+                      onClick={() => {
+                        setUserSentence(prev => [...prev, word]);
+                        setSentenceWords(prev => prev.filter((_, idx) => idx !== i));
+                      }}
+                      style={{
+                        padding: "8px 14px", borderRadius: 10, fontSize: 14, fontWeight: 600,
+                        background: `${THEME.accent}15`, color: THEME.accent,
+                        border: `1.5px solid ${THEME.accent}30`
+                      }}
+                    >
+                      {word}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Action Buttons */}
+              <div style={{ display: "flex", gap: 12 }}>
+                <button
+                  className="vm-btn"
+                  onClick={() => {
+                    setSentenceWords([...sentenceWords, ...userSentence]);
+                    setUserSentence([]);
+                  }}
+                  disabled={userSentence.length === 0}
+                  style={{
+                    flex: 1, padding: 14, borderRadius: 12, fontSize: 14, fontWeight: 600,
+                    background: "transparent", color: THEME.textSecondary,
+                    border: `1.5px solid ${THEME.border}`,
+                    opacity: userSentence.length === 0 ? 0.4 : 1
+                  }}
+                >
+                  🔄 Clear
+                </button>
+                <button
+                  className="vm-btn"
+                  onClick={checkSentence}
+                  disabled={sentenceWords.length > 0}
+                  style={{
+                    flex: 2, padding: 14, borderRadius: 12, fontSize: 15, fontWeight: 700,
+                    background: sentenceWords.length === 0 ? THEME.gradient1 : THEME.surface,
+                    color: sentenceWords.length === 0 ? "#fff" : THEME.textMuted,
+                    border: "none",
+                    opacity: sentenceWords.length > 0 ? 0.4 : 1
+                  }}
+                >
+                  ✓ Check Answer
+                </button>
+              </div>
+            </div>
+          )}
+
+          {phase === "reveal" && (
+            <div style={{ animation: "vmSlideUp 0.3s ease" }}>
+              {/* Result */}
+              <div className="vm-card" style={{
+                padding: 20, marginBottom: 20, textAlign: "center",
+                background: isCorrect ? `${THEME.success}10` : `${THEME.danger}10`,
+                border: `2px solid ${isCorrect ? THEME.success + "40" : THEME.danger + "40"}`
+              }}>
+                <div style={{ fontSize: 48, marginBottom: 8 }}>{isCorrect ? "🎉" : "💪"}</div>
+                <div style={{ fontSize: 20, fontWeight: 800, marginBottom: 8, color: isCorrect ? THEME.success : THEME.danger }}>
+                  {isCorrect ? "Perfect!" : "Not quite!"}
+                </div>
+                <div style={{ fontSize: 13, color: THEME.textSecondary, marginBottom: 16 }}>
+                  Correct sentence:
+                </div>
+                <div style={{ fontSize: 15, fontWeight: 600, lineHeight: 1.6 }}>
+                  {correctSentence.join(' ')}
+                </div>
+              </div>
+
+              <RatingButtons onRate={(rating) => {
+                handleRate(isCorrect ? (rating === "again" ? "hard" : rating) : "again");
+                // Reset for next word
+                setUserSentence([]);
+                setSentenceWords([]);
+                setCorrectSentence([]);
+              }} showEasy={isCorrect} word={currentWord} />
+            </div>
+          )}
+        </div>
+      );
+    }
 
     return null;
   };
@@ -1060,9 +1465,35 @@ export default function VocabMasterPro() {
     const [sessionDone, setSessionDone] = useState(false);
     const [sessionStats, setSessionStats] = useState({ correct: 0, incorrect: 0 });
     const [sessionResults, setSessionResults] = useState([]);
+    const [focusMode, setFocusMode] = useState(false);
 
     const startReview = () => {
-      const q = shuffleArray(dueWords.length > 0 ? dueWords : words).slice(0, 15);
+      let q;
+      if (focusMode) {
+        // Focus mode: prioritize weak words (high failure rate)
+        const weakWords = words
+          .filter(w => {
+            const totalReviews = w.srs?.totalReviews || 0;
+            const wrongReviews = w.srs?.wrongReviews || 0;
+            if (totalReviews < 2) return false;
+            const failureRate = wrongReviews / totalReviews;
+            return failureRate > 0.25; // More than 25% failure rate
+          })
+          .sort((a, b) => {
+            const aRate = (a.srs?.wrongReviews || 0) / (a.srs?.totalReviews || 1);
+            const bRate = (b.srs?.wrongReviews || 0) / (b.srs?.totalReviews || 1);
+            return bRate - aRate; // Highest failure rate first
+          });
+
+        q = weakWords.length > 0 ? weakWords.slice(0, 100) : selectWordsForReview(words, dueWords, 100);
+        if (weakWords.length > 0) {
+          showToast(`🎯 Focusing on ${q.length} weak words`, "info");
+        }
+      } else {
+        // Normal mode: prioritize due words, then least reviewed (up to 100)
+        q = selectWordsForReview(words, dueWords, 100);
+      }
+
       setQueue(q);
       setIdx(0);
       setFlipped(false);
@@ -1100,6 +1531,26 @@ export default function VocabMasterPro() {
       }
     };
 
+    // Empty state - no words available
+    if (words.length === 0) {
+      return (
+        <div style={{ padding: "40px 16px 100px", maxWidth: 480, margin: "0 auto", textAlign: "center", animation: "vmFadeIn 0.4s ease" }}>
+          <button className="vm-btn" onClick={() => setScreen("home")} style={{ position: "absolute", top: 20, left: 16, background: "none", color: THEME.textSecondary, fontSize: 22, padding: 4 }}>←</button>
+          <div style={{ fontSize: 64, marginBottom: 24 }}>📚</div>
+          <div style={{ fontSize: 24, fontWeight: 800, marginBottom: 12 }}>No Vocabulary Yet</div>
+          <div style={{ fontSize: 15, color: THEME.textSecondary, marginBottom: 32, lineHeight: 1.6 }}>
+            You haven't added any words yet.<br/>
+            Go to <strong style={{ color: THEME.accent }}>Words</strong> tab to import or add vocabulary.
+          </div>
+          <button className="vm-btn" onClick={() => setScreen("words")} style={{
+            padding: "14px 32px", borderRadius: 14, background: THEME.gradient1, color: "#fff", fontSize: 15
+          }}>
+            ➕ Add Words
+          </button>
+        </div>
+      );
+    }
+
     if (!started) return (
       <div style={{ padding: "20px 16px 100px", maxWidth: 480, margin: "0 auto", animation: "vmFadeIn 0.4s ease" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 28 }}>
@@ -1124,6 +1575,26 @@ export default function VocabMasterPro() {
               <div style={{ fontSize: 11, color: THEME.textMuted }}>Total words</div>
             </div>
           </div>
+
+          {/* Focus Mode Toggle */}
+          <div style={{ marginBottom: 20 }}>
+            <button
+              className="vm-btn"
+              onClick={() => setFocusMode(!focusMode)}
+              style={{
+                width: "100%", padding: 14, borderRadius: 12, fontSize: 14, fontWeight: 600,
+                background: focusMode ? `${THEME.warning}20` : "transparent",
+                color: focusMode ? THEME.warning : THEME.textSecondary,
+                border: `2px solid ${focusMode ? THEME.warning + "60" : THEME.border}`,
+                display: "flex", alignItems: "center", justifyContent: "center", gap: 8,
+                transition: "all 0.2s ease"
+              }}
+            >
+              <span style={{ fontSize: 16 }}>{focusMode ? "⚠️" : "🎯"}</span>
+              <span>{focusMode ? "Focus Mode: ON (Weak Words)" : "Focus Mode: OFF (All Words)"}</span>
+            </button>
+          </div>
+
           <button className="vm-btn" onClick={startReview} style={{
             padding: "16px 48px", borderRadius: 14, background: THEME.gradient2, color: "#fff", fontSize: 16,
           }}>Start Review</button>
@@ -1165,7 +1636,7 @@ export default function VocabMasterPro() {
         
         {flipped && (
           <div style={{ marginTop: 20, animation: "vmSlideUp 0.3s ease" }}>
-            <RatingButtons onRate={handleRate} />
+            <RatingButtons onRate={handleRate} word={currentWord} />
           </div>
         )}
       </div>
@@ -1186,6 +1657,49 @@ export default function VocabMasterPro() {
     const [quizResults, setQuizResults] = useState([]);
     const spellingRef = useRef(null);
     const processingRef = useRef(false);
+    // Reading comprehension state
+    const [readingQuestionIdx, setReadingQuestionIdx] = useState(0);
+    const [readingScore, setReadingScore] = useState(0);
+
+    const generateReadingPassage = (vocabWords) => {
+      // TOEIC-style passage templates
+      const templates = [
+        {
+          type: "email",
+          template: (w) => `Dear Team,\n\nI am writing to ${w[0].term} the upcoming project changes. It is ${w[1].term} that we maintain clear communication throughout this process. Our team's ability to ${w[2].term} will determine our success.\n\nPlease review the attached documents and provide your feedback by Friday.\n\nBest regards,\nProject Manager`,
+          purpose: "To inform team about project changes",
+          question: "When should team members provide feedback?",
+          answer: "By Friday",
+          wrong: ["By Monday", "Immediately", "Next month"]
+        },
+        {
+          type: "memo",
+          template: (w) => `MEMO\n\nTo: All Staff\nFrom: Management\nRe: New Policy\n\nEffective immediately, all employees must ${w[0].term} their timesheets weekly. This ${w[1].term} approach will help us ${w[2].term} our payroll process and ensure accuracy.\n\nThank you for your cooperation.`,
+          purpose: "To announce a new company policy",
+          question: "How often must employees submit timesheets?",
+          answer: "Weekly",
+          wrong: ["Daily", "Monthly", "Bi-weekly"]
+        },
+        {
+          type: "notice",
+          template: (w) => `IMPORTANT NOTICE\n\nThe office will ${w[0].term} a system upgrade next Tuesday. This ${w[1].term} maintenance is necessary to ${w[2].term} our network security. Please save all work before 5 PM.\n\nWe apologize for any inconvenience.`,
+          purpose: "To notify staff about system maintenance",
+          question: "When will the system upgrade occur?",
+          answer: "Next Tuesday",
+          wrong: ["This Friday", "Next Monday", "This Tuesday"]
+        }
+      ];
+
+      const template = templates[Math.floor(Math.random() * templates.length)];
+      return {
+        text: template.template(vocabWords),
+        type: template.type,
+        correctPurpose: template.purpose,
+        specificQuestion: template.question,
+        correctAnswer: template.answer,
+        wrongAnswers: template.wrong
+      };
+    };
 
     const generateQuiz = (type) => {
       setQuizType(type);
@@ -1227,6 +1741,41 @@ export default function VocabMasterPro() {
             qs.push({ words: matchWords, type: "match" });
           }
           if (qs.length >= 5) break;
+        } else if (type === "reading") {
+          // Reading comprehension - generate passage with 3-5 words
+          const passageWords = pool.slice(i, Math.min(i + 5, pool.length));
+          if (passageWords.length >= 3) {
+            // Generate a business/TOEIC-style passage
+            const passage = generateReadingPassage(passageWords);
+            // Create 3 comprehension questions
+            const readingQuestions = [
+              {
+                question: `What is the main purpose of this ${passage.type}?`,
+                options: shuffleArray([
+                  { text: passage.correctPurpose, correct: true },
+                  { text: "To provide entertainment", correct: false },
+                  { text: "To request a refund", correct: false },
+                  { text: "To complain about service", correct: false },
+                ])
+              },
+              {
+                question: `According to the passage, what does "${passageWords[0].term}" mean?`,
+                options: shuffleArray([
+                  { text: passageWords[0].definition, correct: true },
+                  ...distractors.slice(0, 3).map(d => ({ text: d.definition, correct: false })),
+                ])
+              },
+              {
+                question: passage.specificQuestion,
+                options: shuffleArray([
+                  { text: passage.correctAnswer, correct: true },
+                  ...passage.wrongAnswers.map(a => ({ text: a, correct: false })),
+                ])
+              }
+            ];
+            qs.push({ type: "reading", passage: passage.text, passageType: passage.type, questions: readingQuestions, words: passageWords });
+          }
+          if (qs.length >= 3) break; // Reading has multiple questions, so limit to 3 passages
         }
       }
 
@@ -1237,6 +1786,8 @@ export default function VocabMasterPro() {
       setScore(0);
       setQuizDone(false);
       setQuizResults([]);
+      setReadingQuestionIdx(0);
+      setReadingScore(0);
     };
 
     const checkAnswer = (answer) => {
@@ -1249,21 +1800,37 @@ export default function VocabMasterPro() {
       const q = questions[qIdx];
       let correct = false;
 
-      if (q.type === "mc" || q.type === "listen") correct = answer.correct;
-      else if (q.type === "tf") correct = answer === q.isTrue;
-      else if (q.type === "fill" || q.type === "spell") {
+      if (q.type === "reading") {
+        // For reading, answer is the selected option
+        correct = answer.correct;
+        if (correct) setReadingScore(s => s + 1);
+      } else if (q.type === "mc" || q.type === "listen") {
+        correct = answer.correct;
+      } else if (q.type === "tf") {
+        correct = answer === q.isTrue;
+      } else if (q.type === "fill" || q.type === "spell") {
         correct = answer.toLowerCase().trim() === q.word.term.toLowerCase();
       }
 
       setIsCorrect(correct);
       if (correct) setScore(s => s + 1);
 
-      // Store result for batch SRS update later
-      setQuizResults(prev => [...prev, {
-        wordId: q.word?.id,
-        correct,
-        rating: correct ? "good" : "again"
-      }]);
+      // Store result for batch SRS update later (reading updates all words in passage)
+      if (q.type === "reading") {
+        q.words?.forEach(word => {
+          setQuizResults(prev => [...prev, {
+            wordId: word.id,
+            correct,
+            rating: correct ? "good" : "again"
+          }]);
+        });
+      } else {
+        setQuizResults(prev => [...prev, {
+          wordId: q.word?.id,
+          correct,
+          rating: correct ? "good" : "again"
+        }]);
+      }
 
       // Scroll to show Continue button
       setTimeout(() => {
@@ -1273,6 +1840,23 @@ export default function VocabMasterPro() {
 
     const nextQuestion = () => {
       processingRef.current = false;
+
+      const q = questions[qIdx];
+
+      // Handle reading comprehension with multiple questions
+      if (q.type === "reading" && q.questions && readingQuestionIdx + 1 < q.questions.length) {
+        // Move to next question in the same passage
+        setReadingQuestionIdx(idx => idx + 1);
+        setSelected(null);
+        setAnswered(false);
+        setIsCorrect(false);
+        return;
+      }
+
+      // Reset reading question index for next passage
+      if (q.type === "reading") {
+        setReadingQuestionIdx(0);
+      }
 
       if (qIdx + 1 >= questions.length) {
         // Batch update SRS for all answered questions
@@ -1297,6 +1881,26 @@ export default function VocabMasterPro() {
       }
     };
 
+    // Empty state - no words available
+    if (words.length === 0) {
+      return (
+        <div style={{ padding: "40px 16px 100px", maxWidth: 480, margin: "0 auto", textAlign: "center", animation: "vmFadeIn 0.4s ease" }}>
+          <button className="vm-btn" onClick={() => setScreen("home")} style={{ position: "absolute", top: 20, left: 16, background: "none", color: THEME.textSecondary, fontSize: 22, padding: 4 }}>←</button>
+          <div style={{ fontSize: 64, marginBottom: 24 }}>📚</div>
+          <div style={{ fontSize: 24, fontWeight: 800, marginBottom: 12 }}>No Vocabulary Yet</div>
+          <div style={{ fontSize: 15, color: THEME.textSecondary, marginBottom: 32, lineHeight: 1.6 }}>
+            You haven't added any words yet.<br/>
+            Go to <strong style={{ color: THEME.accent }}>Words</strong> tab to import or add vocabulary.
+          </div>
+          <button className="vm-btn" onClick={() => setScreen("words")} style={{
+            padding: "14px 32px", borderRadius: 14, background: THEME.gradient1, color: "#fff", fontSize: 15
+          }}>
+            ➕ Add Words
+          </button>
+        </div>
+      );
+    }
+
     // Quiz Type Select
     if (!quizType) return (
       <div style={{ padding: "20px 16px 100px", maxWidth: 480, margin: "0 auto", animation: "vmFadeIn 0.4s ease" }}>
@@ -1309,6 +1913,7 @@ export default function VocabMasterPro() {
           {[
             { id: "mc", icon: "🔤", name: "Multiple Choice", desc: "Pick the right definition", color: THEME.accent },
             { id: "tf", icon: "✅", name: "True / False", desc: "Is this definition correct?", color: THEME.success },
+            { id: "reading", icon: "📖", name: "Reading", desc: "TOEIC-style comprehension", color: "#00b894", featured: true },
             { id: "fill", icon: "✏️", name: "Fill in Blank", desc: "Complete the sentence", color: THEME.warning },
             { id: "spell", icon: "📝", name: "Spelling", desc: "Type the correct word", color: THEME.info },
             { id: "listen", icon: "👂", name: "Listening", desc: "Identify the spoken word", color: THEME.danger },
@@ -1499,6 +2104,58 @@ export default function VocabMasterPro() {
           </div>
         )}
 
+        {/* Reading Comprehension */}
+        {q.type === "reading" && (
+          <div style={{ animation: "vmFadeIn 0.3s ease" }}>
+            {/* Passage */}
+            <div className="vm-card" style={{ padding: 20, marginBottom: 20, background: THEME.surface }}>
+              <div style={{ fontSize: 11, fontWeight: 700, color: THEME.warning, textTransform: "uppercase", marginBottom: 12, display: "flex", alignItems: "center", gap: 8 }}>
+                <span>📖</span>
+                <span>{q.passageType.toUpperCase()}</span>
+              </div>
+              <div style={{ fontSize: 14, lineHeight: 1.8, color: THEME.text, whiteSpace: "pre-wrap", fontFamily: "Georgia, serif" }}>
+                {q.passage}
+              </div>
+            </div>
+
+            {/* Current Reading Question */}
+            {q.questions && q.questions[readingQuestionIdx] && (
+              <div>
+                <div className="vm-card" style={{ padding: 16, marginBottom: 16, background: `${THEME.accent}08`, border: `1.5px solid ${THEME.accent}30` }}>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: THEME.accent, marginBottom: 8 }}>
+                    Question {readingQuestionIdx + 1} of {q.questions.length}
+                  </div>
+                  <div style={{ fontSize: 15, fontWeight: 600, lineHeight: 1.6 }}>
+                    {q.questions[readingQuestionIdx].question}
+                  </div>
+                </div>
+
+                {/* Options */}
+                {q.questions[readingQuestionIdx].options.map((opt, i) => (
+                  <button
+                    key={i}
+                    className="vm-btn"
+                    onClick={() => checkAnswer(opt)}
+                    disabled={answered}
+                    style={{
+                      width: "100%", padding: 14, marginBottom: 10, borderRadius: 12, textAlign: "left",
+                      background: !answered ? THEME.card : opt.correct ? `${THEME.success}15` : (selected === opt ? `${THEME.danger}15` : THEME.card),
+                      border: `1.5px solid ${!answered ? THEME.border : opt.correct ? THEME.success : (selected === opt ? THEME.danger : THEME.border)}`,
+                      color: THEME.text, fontSize: 14, lineHeight: 1.5,
+                      opacity: answered && !opt.correct && selected !== opt ? 0.4 : 1,
+                    }}
+                  >
+                    <span style={{ fontWeight: 600, marginRight: 8, color: THEME.textMuted }}>{String.fromCharCode(65 + i)}.</span>
+                    {opt.text}
+                    {answered && opt.correct && <span style={{ float: "right", color: THEME.success }}>✓</span>}
+                    {answered && selected === opt && !opt.correct && <span style={{ float: "right", color: THEME.danger }}>✕</span>}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
         {/* Matching */}
         {q.type === "match" && <MatchingQuiz question={q} answered={answered} onAnswer={(correct) => {
           if (processingRef.current) return;
@@ -1537,7 +2194,12 @@ export default function VocabMasterPro() {
               width: "100%", padding: 20, borderRadius: 14, background: THEME.gradient1, color: "#fff", fontSize: 18, fontWeight: 700,
               boxShadow: "0 8px 24px rgba(108,92,231,0.5)",
             }}>
-              {qIdx + 1 >= questions.length ? "📊 See Results" : "Continue →"}
+              {qIdx + 1 >= questions.length
+                ? "📊 See Results"
+                : q.type === "reading" && readingQuestionIdx + 1 < q.questions.length
+                  ? `Next Question (${readingQuestionIdx + 2}/${q.questions.length}) →`
+                  : "Continue →"
+              }
             </button>
           </div>
         )}
@@ -1626,7 +2288,7 @@ export default function VocabMasterPro() {
       return result;
     }, [words, search, filter]);
 
-    const handleImport = () => {
+    const handleImport = async () => {
       const lines = importText.split("\n").filter(l => l.trim() && !l.startsWith("#"));
       const newWords = lines.map((line, i) => {
         const parts = line.split("|").map(p => p.trim());
@@ -1643,16 +2305,26 @@ export default function VocabMasterPro() {
           srs: {},
         };
       }).filter(Boolean);
-      
+
       if (newWords.length > 0) {
         setWords(prev => [...prev, ...newWords]);
-        showToast(`Imported ${newWords.length} words!`);
+
+        // Save to Firestore if available
+        if (firestoreService && userId) {
+          showToast(`💾 Saving ${newWords.length} words to Firestore...`, "warning");
+          const promises = newWords.map(word => firestoreService.saveWord(word));
+          await Promise.all(promises);
+          showToast(`✅ Imported ${newWords.length} words!`, "success");
+        } else {
+          showToast(`✅ Imported ${newWords.length} words!`, "success");
+        }
+
         setShowImport(false);
         setImportText("");
       }
     };
 
-    const handleAddWord = () => {
+    const handleAddWord = async () => {
       if (!newWord.term.trim() || !newWord.definition.trim()) return;
       const word = {
         id: `w_${Date.now()}`,
@@ -1662,13 +2334,25 @@ export default function VocabMasterPro() {
         srs: {},
       };
       setWords(prev => [...prev, word]);
+
+      // Save to Firestore if available
+      if (firestoreService && userId) {
+        await firestoreService.saveWord(word);
+      }
+
       showToast(`Added "${word.term}"`);
       setShowAdd(false);
       setNewWord({ term: "", definition: "", phonetic: "", partOfSpeech: "n", examples: "", synonyms: "", category: "custom" });
     };
 
-    const deleteWord = (id) => {
+    const deleteWord = async (id) => {
       setWords(prev => prev.filter(w => w.id !== id));
+
+      // Delete from Firestore if available
+      if (firestoreService && userId) {
+        await firestoreService.deleteWord(id);
+      }
+
       showToast("Word deleted", "warning");
     };
 
@@ -1852,8 +2536,26 @@ export default function VocabMasterPro() {
       const days = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
       return days.map((d, i) => ({ day: d, reviews: Math.floor(Math.random() * 20) + (stats.todayReviews || 0) * (i === new Date().getDay() - 1 ? 1 : 0) }));
     }, [stats]);
-    
+
     const maxReviews = Math.max(...weeklyData.map(d => d.reviews), 1);
+
+    // Calculate weak words (failure rate > 30% and at least 3 reviews)
+    const weakWords = useMemo(() => {
+      return words
+        .filter(w => {
+          const totalReviews = w.srs?.totalReviews || 0;
+          const wrongReviews = w.srs?.wrongReviews || 0;
+          if (totalReviews < 3) return false; // Need at least 3 reviews to be statistically relevant
+          const failureRate = wrongReviews / totalReviews;
+          return failureRate > 0.3; // More than 30% failure rate
+        })
+        .map(w => ({
+          ...w,
+          failureRate: ((w.srs?.wrongReviews || 0) / (w.srs?.totalReviews || 1)) * 100
+        }))
+        .sort((a, b) => b.failureRate - a.failureRate) // Highest failure rate first
+        .slice(0, 10); // Top 10 weak words
+    }, [words]);
 
     return (
       <div style={{ padding: "20px 16px 100px", maxWidth: 480, margin: "0 auto", animation: "vmFadeIn 0.4s ease" }}>
@@ -1892,7 +2594,56 @@ export default function VocabMasterPro() {
             ))}
           </div>
         </div>
-        
+
+        {/* Weak Words Analysis */}
+        {weakWords.length > 0 && (
+          <div className="vm-card" style={{ padding: 20, marginBottom: 20 }}>
+            <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 4, display: "flex", alignItems: "center", gap: 8 }}>
+              ⚠️ <span>Weak Areas</span>
+            </div>
+            <div style={{ fontSize: 12, color: THEME.textSecondary, marginBottom: 16 }}>
+              Words with high failure rate (need more practice)
+            </div>
+
+            {weakWords.map((word, idx) => (
+              <div key={word.id} style={{
+                padding: "12px 0",
+                borderBottom: idx < weakWords.length - 1 ? `1px solid ${THEME.border}15` : "none",
+                display: "flex", alignItems: "center", gap: 12
+              }}>
+                <div style={{
+                  width: 32, height: 32, borderRadius: 8,
+                  background: `${THEME.danger}20`, border: `1.5px solid ${THEME.danger}40`,
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  fontSize: 11, fontWeight: 700, color: THEME.danger
+                }}>
+                  {Math.round(word.failureRate)}%
+                </div>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 14, fontWeight: 700 }}>{word.term}</div>
+                  <div style={{ fontSize: 11, color: THEME.textSecondary }}>
+                    {word.srs?.wrongReviews || 0} wrong / {word.srs?.totalReviews || 0} total
+                  </div>
+                </div>
+                <button
+                  className="vm-btn"
+                  onClick={() => {
+                    setScreen("review");
+                    showToast(`Focus on: ${word.term}`, "info");
+                  }}
+                  style={{
+                    padding: "6px 12px", borderRadius: 8, fontSize: 11, fontWeight: 600,
+                    background: `${THEME.accent}15`, color: THEME.accent,
+                    border: `1px solid ${THEME.accent}30`
+                  }}
+                >
+                  Review
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+
         {/* Mastery Breakdown */}
         <div className="vm-card" style={{ padding: 20, marginBottom: 20 }}>
           <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 14 }}>Mastery Breakdown</div>
@@ -1968,42 +2719,68 @@ export default function VocabMasterPro() {
         const data = await importData(file);
         setWords(data.words);
         if (data.stats) setStats(prev => ({ ...prev, ...data.stats }));
-        showToast("✅ Data imported successfully!", "success");
+
+        // Save to Firestore if available
+        if (firestoreService && userId && data.words?.length > 0) {
+          showToast(`💾 Saving ${data.words.length} words to Firestore...`, "warning");
+          const promises = data.words.map(word => firestoreService.saveWord(word));
+          await Promise.all(promises);
+          showToast("✅ Data imported successfully!", "success");
+        } else {
+          showToast("✅ Data imported successfully!", "success");
+        }
       } catch (error) {
         showToast(`❌ ${error.message}`, "danger");
       }
       e.target.value = "";
     };
 
-    const handleRestoreBackup = (backupKey) => {
+    const handleRestoreBackup = async (backupKey) => {
       try {
         const data = restoreBackup(backupKey);
         setWords(data.words);
         setStats(prev => ({ ...prev, ...data.stats }));
-        showToast("✅ Backup restored!", "success");
+
+        // Save to Firestore if available
+        if (firestoreService && userId && data.words?.length > 0) {
+          showToast(`💾 Saving ${data.words.length} words to Firestore...`, "warning");
+          const promises = data.words.map(word => firestoreService.saveWord(word));
+          await Promise.all(promises);
+          showToast("✅ Backup restored!", "success");
+        } else {
+          showToast("✅ Backup restored!", "success");
+        }
       } catch (error) {
         showToast(`❌ ${error.message}`, "danger");
       }
     };
 
-    const handleLoadTOEIC = () => {
-      if (confirm("Load TOEIC vocabulary? This will replace your current words.")) {
-        setWords(getAllTOEICWords());
-        showToast("✅ TOEIC vocabulary loaded!", "success");
-      }
-    };
+    const handleResetData = async () => {
+      if (confirm("⚠️ Reset all data? This will delete EVERYTHING!")) {
+        if (confirm("Are you absolutely sure? All progress will be lost FOREVER!")) {
+          try {
+            // Delete from Firestore if using Firebase
+            if (firestoreService && userId) {
+              showToast("🗑️ Deleting all data...", "warning");
+              await firestoreService.deleteAllUserData();
+            }
 
-    const handleResetData = () => {
-      if (confirm("⚠️ Reset all data? This cannot be undone!")) {
-        if (confirm("Are you absolutely sure? All progress will be lost!")) {
-          localStorage.clear();
-          setWords(getAllTOEICWords());
-          setStats({
-            streak: 0, lastStudyDate: null, totalReviews: 0, totalQuizzes: 0,
-            perfectQuizzes: 0, nightStudy: false, speedReview: false,
-            todayReviews: 0, todayDate: new Date().toDateString(), xp: 0,
-          });
-          showToast("🔄 Data reset complete", "success");
+            // Clear localStorage
+            localStorage.clear();
+
+            // Reset state to empty
+            setWords([]);
+            setStats({
+              streak: 0, lastStudyDate: null, totalReviews: 0, totalQuizzes: 0,
+              perfectQuizzes: 0, nightStudy: false, speedReview: false,
+              todayReviews: 0, todayDate: new Date().toDateString(), xp: 0, dailyGoal: 20,
+            });
+
+            showToast("✅ All data deleted! Start fresh.", "success");
+          } catch (error) {
+            console.error('Reset error:', error);
+            showToast("❌ Error: " + error.message, "danger");
+          }
         }
       }
     };
@@ -2013,6 +2790,78 @@ export default function VocabMasterPro() {
         <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 28 }}>
           <button className="vm-btn" onClick={() => setScreen("home")} style={{ background: "none", color: THEME.textSecondary, fontSize: 22, padding: 4 }}>←</button>
           <div style={{ fontSize: 22, fontWeight: 800 }}>Settings & Data</div>
+        </div>
+
+        {/* User Profile (if signed in with Firebase) */}
+        {userId && userEmail && (
+          <div className="vm-card" style={{ padding: 20, marginBottom: 16 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 16, marginBottom: 16 }}>
+              {userPhoto ? (
+                <img src={userPhoto} alt="Profile" style={{
+                  width: 56, height: 56, borderRadius: "50%",
+                  border: `2px solid ${THEME.accent}40`
+                }} />
+              ) : (
+                <div style={{
+                  width: 56, height: 56, borderRadius: "50%",
+                  background: THEME.gradient1,
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  fontSize: 24, fontWeight: 700, color: "#fff"
+                }}>
+                  {userEmail[0].toUpperCase()}
+                </div>
+              )}
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 4 }}>
+                  {userEmail}
+                </div>
+                <div style={{ fontSize: 12, color: THEME.textSecondary }}>
+                  ☁️ Synced with Firebase
+                </div>
+              </div>
+            </div>
+
+            {onSignOut && (
+              <button className="vm-btn" onClick={onSignOut} style={{
+                width: "100%", padding: 14, borderRadius: 12,
+                background: `${THEME.danger}15`, color: THEME.danger, fontSize: 14,
+                border: `1.5px solid ${THEME.danger}30`, fontWeight: 600
+              }}>
+                🚪 Sign Out
+              </button>
+            )}
+          </div>
+        )}
+
+        {/* Daily Goal Settings */}
+        <div className="vm-card" style={{ padding: 20, marginBottom: 16 }}>
+          <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 16, display: "flex", alignItems: "center", gap: 8 }}>
+            🎯 <span>Daily Goal</span>
+          </div>
+          <div style={{ fontSize: 13, color: THEME.textSecondary, marginBottom: 16 }}>
+            Set how many words you want to review each day
+          </div>
+
+          <div style={{ display: "flex", gap: 8 }}>
+            {[20, 50, 100].map(goal => (
+              <button
+                key={goal}
+                className="vm-btn"
+                onClick={() => setStats(prev => ({ ...prev, dailyGoal: goal }))}
+                style={{
+                  flex: 1, padding: 16, borderRadius: 12, fontSize: 14, fontWeight: 700,
+                  background: stats.dailyGoal === goal ? THEME.gradient1 : `${THEME.accent}10`,
+                  color: stats.dailyGoal === goal ? "#fff" : THEME.accent,
+                  border: `2px solid ${stats.dailyGoal === goal ? "transparent" : THEME.accent + "30"}`,
+                  boxShadow: stats.dailyGoal === goal ? `0 4px 16px ${THEME.accent}40` : "none",
+                  transition: "all 0.2s ease"
+                }}
+              >
+                <div style={{ fontSize: 20, marginBottom: 4 }}>{goal}</div>
+                <div style={{ fontSize: 11, opacity: 0.8 }}>words/day</div>
+              </button>
+            ))}
+          </div>
         </div>
 
         {/* Data Management */}
@@ -2066,39 +2915,6 @@ export default function VocabMasterPro() {
               <div style={{ fontWeight: 700 }}>Import JSON</div>
               <div style={{ fontSize: 11, opacity: 0.8 }}>Restore from backup file</div>
             </div>
-          </button>
-        </div>
-
-        {/* TOEIC Lessons */}
-        <div className="vm-card" style={{ padding: 20, marginBottom: 16 }}>
-          <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 16, display: "flex", alignItems: "center", gap: 8 }}>
-            📚 <span>TOEIC Vocabulary</span>
-          </div>
-
-          <div style={{ marginBottom: 12 }}>
-            <div style={{ fontSize: 13, color: THEME.textSecondary, marginBottom: 8 }}>
-              Current: {words.length} words loaded
-            </div>
-            {TOEIC_LESSONS.map((lesson, idx) => (
-              <div key={lesson.id} style={{
-                padding: 12, marginBottom: 8, borderRadius: 10,
-                background: THEME.surface, border: `1px solid ${THEME.border}`,
-              }}>
-                <div style={{ fontSize: 14, fontWeight: 700, color: THEME.text }}>
-                  {lesson.title}
-                </div>
-                <div style={{ fontSize: 12, color: THEME.textMuted }}>
-                  {lesson.description} • {lesson.words.length} words
-                </div>
-              </div>
-            ))}
-          </div>
-
-          <button className="vm-btn" onClick={handleLoadTOEIC} style={{
-            width: "100%", padding: 14, borderRadius: 12,
-            background: THEME.gradient1, color: "#fff", fontSize: 14,
-          }}>
-            🔄 Reload TOEIC Vocabulary
           </button>
         </div>
 
@@ -2195,9 +3011,10 @@ export default function VocabMasterPro() {
         position: "fixed", bottom: 0, left: 0, right: 0, zIndex: 100,
         background: "rgba(10,10,15,0.92)", backdropFilter: "blur(20px)", WebkitBackdropFilter: "blur(20px)",
         borderTop: `1px solid ${THEME.border}`,
-        display: "flex", justifyContent: "center", padding: "8px 16px 12px",
+        display: "flex", justifyContent: "center", padding: "8px 8px 12px",
+        overflowX: "auto", overflowY: "hidden",
       }}>
-        <div style={{ display: "flex", gap: 4, maxWidth: 480, width: "100%", justifyContent: "space-around" }}>
+        <div style={{ display: "flex", gap: 2, maxWidth: 480, width: "100%", justifyContent: "space-around", minWidth: "fit-content" }}>
           {[
             { id: "home", icon: "🏠", label: "Home" },
             { id: "learn", icon: "🧠", label: "Learn" },
@@ -2209,7 +3026,7 @@ export default function VocabMasterPro() {
           ].map(nav => (
             <div key={nav.id} className={`vm-nav-item ${screen === nav.id ? "active" : ""}`} onClick={() => setScreen(nav.id)}>
               <span className="nav-icon">{nav.icon}</span>
-              <span>{nav.label}</span>
+              <span className="nav-label">{nav.label}</span>
             </div>
           ))}
         </div>
