@@ -6,6 +6,7 @@ import {
   subscribeToWords,
   subscribeToStats,
   saveWord,
+  saveWords,
   saveStats,
   deleteWord,
   migrateLocalStorageToFirestore,
@@ -35,9 +36,15 @@ export default function VocabMasterProWithAuth() {
     return () => unsubscribe();
   }, []);
 
-  // Migrate localStorage data to Firestore (one-time)
+  // Migrate localStorage data to Firestore (truly one-time, tracked in localStorage)
   useEffect(() => {
     if (user && !migrated) {
+      const migrationKey = `vm_migrated_${user.uid}`;
+      if (localStorage.getItem(migrationKey)) {
+        setMigrated(true);
+        return;
+      }
+
       const migrate = async () => {
         const hasLocalData = localStorage.getItem('vm_words');
         if (hasLocalData) {
@@ -46,11 +53,13 @@ export default function VocabMasterProWithAuth() {
 
           if (result.success) {
             console.log(`✅ Migrated ${result.migratedWords} words`);
-            // Keep localStorage as backup, don't remove
+            localStorage.removeItem('vm_words');
+            localStorage.removeItem('vm_stats');
           } else {
             console.error('❌ Migration failed:', result.error);
           }
         }
+        localStorage.setItem(migrationKey, 'true');
         setMigrated(true);
       };
 
@@ -72,6 +81,7 @@ export default function VocabMasterProWithAuth() {
     if (!user) return null;
     return {
       saveWord: (word) => saveWord(user.uid, word),
+      saveWords: (words) => saveWords(user.uid, words),
       saveStats: (stats) => saveStats(user.uid, stats),
       deleteWord: (wordId) => deleteWord(user.uid, wordId),
       subscribeToWords: (callback) => subscribeToWords(user.uid, callback),

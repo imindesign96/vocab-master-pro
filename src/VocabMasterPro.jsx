@@ -577,6 +577,10 @@ export default function VocabMasterPro({
   const isSyncingFromFirestore = useRef(false);
   // Ref to pause Firestore updates during learning session
   const isInLearningSession = useRef(false);
+  // Ref to store pending review updates (deferred to avoid parent re-render during review)
+  const pendingReviewUpdate = useRef(null);
+  // Ref to accumulate learn session data across batches (deferred to avoid parent re-render)
+  const pendingLearnUpdates = useRef({ reviews: [], queueWords: [] });
 
   // State
   const [words, setWords] = useState(() => {
@@ -622,12 +626,30 @@ export default function VocabMasterPro({
   });
 
   const [toast, setToast] = useState(null);
+  // Track whether initial Firestore data has loaded (prevents flicker on login)
+  const [dataReady, setDataReady] = useState(!firestoreService);
+  const firestoreInitRef = useRef({ words: false, stats: false });
 
   // Firestore realtime sync
   useEffect(() => {
     if (!firestoreService || !userId) return;
 
     console.log('🔄 Setting up Firestore realtime sync...');
+    firestoreInitRef.current = { words: false, stats: false };
+
+    let pendingWords = null;
+    let pendingStats = null;
+
+    const tryFinishInit = () => {
+      if (firestoreInitRef.current.words && firestoreInitRef.current.stats) {
+        // Both arrived - batch into single render
+        isSyncingFromFirestore.current = true;
+        if (pendingWords !== null) setWords(pendingWords);
+        if (pendingStats !== null) setStats(pendingStats);
+        setDataReady(true);
+        setTimeout(() => { isSyncingFromFirestore.current = false; }, 100);
+      }
+    };
 
     // Subscribe to words
     const unsubscribeWords = firestoreService.subscribeToWords((firestoreWords) => {
@@ -637,20 +659,24 @@ export default function VocabMasterPro({
         return;
       }
 
-      isSyncingFromFirestore.current = true; // Set flag before updating state
+      if (!firestoreInitRef.current.words) {
+        // Initial load - batch with stats
+        console.log(`✅ Initial sync: ${firestoreWords.length} words from Firestore`);
+        pendingWords = firestoreWords.length > 0 ? firestoreWords : [];
+        firestoreInitRef.current.words = true;
+        tryFinishInit();
+        return;
+      }
 
+      // Subsequent updates - apply directly
+      isSyncingFromFirestore.current = true;
       if (firestoreWords.length > 0) {
         console.log(`✅ Synced ${firestoreWords.length} words from Firestore`);
         setWords(firestoreWords);
       } else {
-        // No words in Firestore, start empty
-        console.log('📭 No words in Firestore');
         setWords([]);
       }
-
-      setTimeout(() => {
-        isSyncingFromFirestore.current = false; // Reset flag after state update
-      }, 100);
+      setTimeout(() => { isSyncingFromFirestore.current = false; }, 100);
     });
 
     // Subscribe to stats
@@ -661,19 +687,35 @@ export default function VocabMasterPro({
         return;
       }
 
+      if (!firestoreInitRef.current.stats) {
+        // Initial load - batch with words
+        console.log('✅ Initial sync: stats from Firestore');
+        pendingStats = Object.keys(firestoreStats).length > 0 ? firestoreStats : null;
+        firestoreInitRef.current.stats = true;
+        tryFinishInit();
+        return;
+      }
+
+      // Subsequent updates - apply directly
       if (Object.keys(firestoreStats).length > 0) {
         isSyncingFromFirestore.current = true;
         console.log('✅ Synced stats from Firestore');
         setStats(firestoreStats);
-        setTimeout(() => {
-          isSyncingFromFirestore.current = false;
-        }, 100);
+        setTimeout(() => { isSyncingFromFirestore.current = false; }, 100);
       }
     });
+
+    // Safety timeout - if one subscription is slow, don't block forever
+    const safetyTimeout = setTimeout(() => {
+      if (!firestoreInitRef.current.words) firestoreInitRef.current.words = true;
+      if (!firestoreInitRef.current.stats) firestoreInitRef.current.stats = true;
+      tryFinishInit();
+    }, 5000);
 
     return () => {
       unsubscribeWords();
       unsubscribeStats();
+      clearTimeout(safetyTimeout);
     };
   }, [firestoreService, userId]);
 
@@ -694,7 +736,12 @@ export default function VocabMasterPro({
       }, 2000); // Debounce 2s
 
       return () => clearTimeout(timeoutId);
-    } else {
+    }
+  }, [stats, firestoreService, userId]);
+
+  // Separate localStorage backup (only when NOT using Firestore)
+  useEffect(() => {
+    if (!firestoreService || !userId) {
       // Fallback to localStorage
       try {
         localStorage?.setItem?.("vm_words", JSON.stringify(words));
@@ -702,7 +749,7 @@ export default function VocabMasterPro({
         autoBackup(words, stats);
       } catch {}
     }
-  }, [stats, firestoreService, userId, words]);
+  }, [words, stats, firestoreService, userId]);
   
   // Inject styles on mount
   useEffect(() => { injectStyles(); }, []);
@@ -981,10 +1028,24 @@ export default function VocabMasterPro({
     const [sentenceWords, setSentenceWords] = useState([]);
     const [userSentence, setUserSentence] = useState([]);
     const [correctSentence, setCorrectSentence] = useState([]);
+    // Flashcard state
+    const [isFlipped, setIsFlipped] = useState(false);
+
+    // Progressive Hints state
+    const [hintsUsed, setHintsUsed] = useState(0);
+    const [currentHintLevel, setCurrentHintLevel] = useState(0);
+    const [shownHints, setShownHints] = useState([]);
+    const [selectedMCOption, setSelectedMCOption] = useState(null);
+    const [mcChoices, setMcChoices] = useState([]);
 
     const startSession = (selectedMode, batchIndex = 0) => {
       // Pause Firestore updates during session to prevent re-renders
       isInLearningSession.current = true;
+
+      // Reset accumulated data for fresh session (not for continue batch)
+      if (batchIndex === 0) {
+        pendingLearnUpdates.current = { reviews: [], queueWords: [] };
+      }
 
       setMode(selectedMode);
 
@@ -1019,6 +1080,11 @@ export default function VocabMasterPro({
       }
     };
 
+    // Reset flashcard flip state when word changes
+    useEffect(() => {
+      setIsFlipped(false);
+    }, [idx]);
+
     const generateSentence = (word) => {
       // Generate simple sentence templates
       const templates = [
@@ -1044,31 +1110,85 @@ export default function VocabMasterPro({
     const currentWord = queue[idx];
     const progress = queue.length > 0 ? (idx / queue.length) : 0;
 
+    // Reset hints and flashcard flip when word changes
+    useEffect(() => {
+      setHintsUsed(0);
+      setCurrentHintLevel(0);
+      setShownHints([]);
+      setSelectedMCOption(null);
+      setMcChoices([]);
+      setIsFlipped(false); // Reset flip state
+    }, [idx]);
+
     const handleRate = (rating) => {
       if (!currentWord) return;
 
-      // Save to Firestore only (no parent state updates to prevent re-render)
-      const { updated, quality } = updateWordSRSInSession(currentWord, rating);
+      // For Type mode with hints, adjust quality based on hints used
+      let adjustedRating = rating;
+      let adjustedQuality;
 
-      // Track review for batch stats update at end
-      sessionReviewsRef.current.push({ quality, rating });
+      if (mode === "type" && hintsUsed > 0 && isCorrect) {
+        // Override quality based on hints for correct answers
+        adjustedQuality = getQualityFromHints(isCorrect, hintsUsed);
+        // Map quality back to rating for consistency
+        if (adjustedQuality === 5) adjustedRating = "easy";
+        else if (adjustedQuality === 4) adjustedRating = "good";
+        else if (adjustedQuality === 3) adjustedRating = "hard";
+        else adjustedRating = "again";
+      }
+
+      // Save to Firestore only (no parent state updates to prevent re-render)
+      const { updated, quality: originalQuality } = updateWordSRSInSession(currentWord, adjustedRating);
+      const finalQuality = adjustedQuality || originalQuality;
+
+      // Track review for batch stats update at end (with hint-adjusted quality for Type mode)
+      sessionReviewsRef.current.push({
+        quality: finalQuality,
+        rating: adjustedRating,
+        hintsUsed: mode === "type" ? hintsUsed : 0,
+      });
 
       // Update the word in queue for immediate UI feedback
       setQueue(prev => prev.map(w => w.id === currentWord.id ? updated : w));
 
       // Update session stats (local state, safe)
-      const isGood = rating === "good" || rating === "easy";
+      const isGood = adjustedRating === "good" || adjustedRating === "easy";
       setSessionStats(p => ({
         correct: p.correct + (isGood ? 1 : 0),
         incorrect: p.incorrect + (isGood ? 0 : 1),
       }));
 
       // Track word in session history for review display
-      setSessionHistory(prev => [...prev, { word: currentWord, rating, isGood }]);
+      setSessionHistory(prev => [...prev, {
+        word: currentWord,
+        rating: adjustedRating,
+        isGood,
+        hintsUsed: mode === "type" ? hintsUsed : 0,
+      }]);
 
       if (idx + 1 >= queue.length) {
-        // End of session - batch update parent stats
-        batchUpdateStats();
+        // End of batch - accumulate in ref (DON'T call batchUpdateStats to avoid parent re-render)
+        pendingLearnUpdates.current.reviews.push(...sessionReviewsRef.current);
+        pendingLearnUpdates.current.queueWords.push(...queue.map(w => {
+          // Include current word's updated SRS from this batch
+          const qw = w.id === currentWord.id ? updated : w;
+          return qw;
+        }));
+        sessionReviewsRef.current = [];
+
+        // Save to Firestore async (non-blocking, no parent state change)
+        if (firestoreService && userId) {
+          const wordsToSave = queue.map(w => w.id === currentWord.id ? updated : w);
+          setTimeout(async () => {
+            try {
+              await firestoreService.saveWords(wordsToSave);
+              console.log(`✅ Learn batch saved: ${wordsToSave.length} words`);
+            } catch (error) {
+              console.error('❌ Learn batch save error:', error);
+            }
+          }, 100);
+        }
+
         setPhase("done");
       } else {
         // Move to next word
@@ -1086,53 +1206,153 @@ export default function VocabMasterPro({
       setPhase("reveal");
     };
 
-    // Batch update stats from all session reviews
-    const batchUpdateStats = () => {
-      const reviews = sessionReviewsRef.current;
-      if (reviews.length === 0) return;
+    // Progressive Hints functions
+    const generateMCChoices = (correctWord) => {
+      // Generate 3 distractors based on similar words from the queue
+      const otherWords = queue
+        .filter(w => w.id !== correctWord.id && w.term !== correctWord.term)
+        .sort(() => Math.random() - 0.5)
+        .slice(0, 3)
+        .map(w => w.term);
 
-      // Update streak
-      updateStreak();
-
-      // Batch update stats
-      setStats(prev => {
-        const totalXP = reviews.reduce((sum, { quality }) =>
-          sum + (quality >= 4 ? 15 : quality >= 3 ? 10 : 5), 0);
-
-        const newTodayReviews = (prev.todayDate === new Date().toDateString() ? prev.todayReviews : 0) + reviews.length;
-        const dailyGoal = prev.dailyGoal || 20;
-
-        // Check if goal just reached
-        if (newTodayReviews >= dailyGoal && (prev.todayReviews < dailyGoal)) {
-          setTimeout(() => showToast(`🎉 Daily goal reached! ${dailyGoal} reviews completed!`, "success"), 300);
+      // If not enough words in queue, add generic distractors
+      const genericDistractors = ["expand", "continue", "reduce", "increase", "decrease", "maintain"];
+      while (otherWords.length < 3) {
+        const distractor = genericDistractors[Math.floor(Math.random() * genericDistractors.length)];
+        if (!otherWords.includes(distractor) && distractor !== correctWord.term) {
+          otherWords.push(distractor);
         }
+      }
 
-        return {
-          ...prev,
-          totalReviews: prev.totalReviews + reviews.length,
-          xp: prev.xp + totalXP,
-        };
-      });
+      // Shuffle choices with correct answer
+      const choices = [correctWord.term, ...otherWords.slice(0, 3)].sort(() => Math.random() - 0.5);
+      return choices;
     };
 
-    // Sync queue changes back to words state AND Firestore (for when exiting session)
-    const syncQueueToWords = () => {
-      setWords(prev => prev.map(w => {
-        const queueWord = queue.find(q => q.id === w.id);
+    const showNextHint = () => {
+      if (!currentWord) return;
+      const nextLevel = currentHintLevel + 1;
 
-        // Batch save to Firestore if word was updated in queue
-        if (queueWord && queueWord.srs !== w.srs && firestoreService && userId) {
-          firestoreService.saveWord(queueWord);
-        }
-
-        return queueWord || w;
-      }));
+      if (nextLevel === 1) {
+        // Hint 1: Pronunciation
+        setShownHints(prev => [...prev, {
+          level: 1,
+          type: "pronunciation",
+          content: currentWord.phonetic || `/${currentWord.term}/`,
+        }]);
+        setCurrentHintLevel(1);
+        setHintsUsed(1);
+      } else if (nextLevel === 2) {
+        // Hint 2: Full example (already shown, just mark it)
+        setShownHints(prev => [...prev, {
+          level: 2,
+          type: "example",
+          content: currentWord.examples?.[0] || "Example not available",
+        }]);
+        setCurrentHintLevel(2);
+        setHintsUsed(2);
+      } else if (nextLevel === 3) {
+        // Hint 3: First letter
+        setShownHints(prev => [...prev, {
+          level: 3,
+          type: "firstLetter",
+          content: `Starts with "${currentWord.term[0].toUpperCase()}..." (${currentWord.term.length} letters)`,
+        }]);
+        setCurrentHintLevel(3);
+        setHintsUsed(3);
+        // Pre-fill first letter
+        setTypedAnswer(currentWord.term[0]);
+      } else if (nextLevel === 4) {
+        // Hint 4: Multiple choice
+        const choices = generateMCChoices(currentWord);
+        setMcChoices(choices);
+        setShownHints(prev => [...prev, {
+          level: 4,
+          type: "multipleChoice",
+          content: "Choose the correct word",
+        }]);
+        setCurrentHintLevel(4);
+        setHintsUsed(4);
+      }
     };
 
-    // Exit session handler
+    const selectMCOption = (option) => {
+      setSelectedMCOption(option);
+      setTypedAnswer(option);
+      // Auto-focus input to confirm
+      setTimeout(() => inputRef.current?.focus(), 100);
+    };
+
+    // Calculate quality based on hints used
+    const getQualityFromHints = (isCorrect, hintsUsed) => {
+      if (!isCorrect) return 1; // Wrong answer = quality 1
+      if (hintsUsed === 0) return 5; // Perfect
+      if (hintsUsed === 1) return 4; // Good
+      if (hintsUsed === 2) return 3; // Hard
+      return 2; // 3+ hints = Again with partial credit
+    };
+
+    // Calculate XP based on hints used
+    const getXPFromHints = (isCorrect, hintsUsed) => {
+      if (!isCorrect) return 5; // Wrong answer = minimal XP
+      if (hintsUsed === 0) return 15; // Perfect
+      if (hintsUsed === 1) return 10; // Excellent
+      if (hintsUsed === 2) return 5;  // Good
+      if (hintsUsed === 3) return 0;  // Fair
+      return -5; // 4 hints = needs practice
+    };
+
+    // Exit session handler - apply all deferred updates NOW
     const exitSession = () => {
-      batchUpdateStats(); // Update stats before exiting
-      syncQueueToWords(); // Sync queue to words + Firestore
+      // Combine any remaining current-batch reviews with accumulated ones
+      const allReviews = [...pendingLearnUpdates.current.reviews, ...sessionReviewsRef.current];
+      const allQueueWords = [...pendingLearnUpdates.current.queueWords];
+
+      // Also include current queue if not already saved (e.g. user exits mid-batch)
+      if (sessionReviewsRef.current.length > 0) {
+        allQueueWords.push(...queue);
+      }
+
+      // Apply stats update (parent state - OK because we're leaving the session)
+      if (allReviews.length > 0) {
+        updateStreak();
+        setStats(prev => {
+          const totalXP = allReviews.reduce((sum, review) => {
+            const { quality, hintsUsed: reviewHintsUsed = 0 } = review;
+            if (reviewHintsUsed > 0) {
+              const isCorrect = quality >= 3;
+              return sum + getXPFromHints(isCorrect, reviewHintsUsed);
+            }
+            return sum + (quality >= 4 ? 15 : quality >= 3 ? 10 : 5);
+          }, 0);
+
+          const newTodayReviews = (prev.todayDate === new Date().toDateString() ? prev.todayReviews : 0) + allReviews.length;
+          const dailyGoal = prev.dailyGoal || 20;
+
+          if (newTodayReviews >= dailyGoal && (prev.todayReviews < dailyGoal)) {
+            setTimeout(() => showToast(`🎉 Daily goal reached! ${dailyGoal} reviews completed!`, "success"), 300);
+          }
+
+          return {
+            ...prev,
+            totalReviews: prev.totalReviews + allReviews.length,
+            todayReviews: newTodayReviews,
+            todayDate: new Date().toDateString(),
+            xp: prev.xp + totalXP,
+          };
+        });
+      }
+
+      // Sync all updated queue words to parent words state
+      if (allQueueWords.length > 0) {
+        setWords(prev => prev.map(w => {
+          const queueWord = allQueueWords.find(q => q.id === w.id);
+          return queueWord || w;
+        }));
+      }
+
+      // Reset pending data
+      pendingLearnUpdates.current = { reviews: [], queueWords: [] };
 
       // Resume Firestore updates after exiting
       isInLearningSession.current = false;
@@ -1197,8 +1417,9 @@ export default function VocabMasterPro({
           ) : (
             <>
               {[
-                { id: "recall", icon: "🧠", name: "Active Recall", desc: "See word → Think → Reveal → Rate", rec: true, color: THEME.accent },
-                { id: "type", icon: "⌨️", name: "Type Answer", desc: "See definition → Type the word → Check", color: THEME.success },
+                { id: "flashcard", icon: "📇", name: "Learn Flashcard", desc: "Passive learning → Read word + meaning → Build recognition", rec: true, color: THEME.info, new: true },
+                { id: "type", icon: "⌨️", name: "Type Answer", desc: "Active recall → Type the word from definition", color: THEME.success },
+                { id: "recall", icon: "🧠", name: "Active Recall", desc: "See word → Think → Reveal → Rate", color: THEME.accent },
                 { id: "sentence", icon: "📝", name: "Sentence Builder", desc: "Build sentences using vocabulary words", color: THEME.warning },
                 { id: "listen", icon: "👂", name: "Listening", desc: "Hear pronunciation → Recall meaning → Rate", color: THEME.info },
               ].map(m => (
@@ -1215,6 +1436,7 @@ export default function VocabMasterPro({
               <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                 <span style={{ fontSize: 17, fontWeight: 700, color: THEME.text }}>{m.name}</span>
                 {m.rec && <span className="vm-tag" style={{ background: `${THEME.accent}20`, color: THEME.accent, fontSize: 10 }}>Recommended</span>}
+                {m.new && <span className="vm-tag" style={{ background: `${THEME.success}20`, color: THEME.success, fontSize: 10 }}>✨ New</span>}
               </div>
               <div style={{ fontSize: 13, color: THEME.textSecondary, marginTop: 4 }}>{m.desc}</div>
             </div>
@@ -1340,6 +1562,306 @@ export default function VocabMasterPro({
 
     if (!currentWord) return null;
 
+    // Learn Flashcard Mode (Passive Learning)
+    if (mode === "flashcard") {
+      // Text-to-Speech function
+      const speakWord = () => {
+        if ('speechSynthesis' in window) {
+          const utterance = new SpeechSynthesisUtterance(currentWord.term);
+          utterance.lang = 'en-US';
+          utterance.rate = 0.9; // Slightly slower for clarity
+          window.speechSynthesis.cancel(); // Cancel any ongoing speech
+          window.speechSynthesis.speak(utterance);
+        } else {
+          showToast("Text-to-speech not supported in this browser", "danger");
+        }
+      };
+
+      return (
+        <div style={{ padding: "20px 16px 100px", maxWidth: 480, margin: "0 auto", animation: "vmFadeIn 0.3s ease" }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 20 }}>
+            <button className="vm-btn" onClick={exitSession} style={{ background: "none", color: THEME.textSecondary, fontSize: 22, padding: 4 }}>←</button>
+            <div style={{ fontSize: 13, fontWeight: 600, color: THEME.textSecondary }}>{idx + 1} / {queue.length}</div>
+            <div className="vm-mono" style={{ fontSize: 12, color: THEME.info }}>📇 Learn Flashcard</div>
+          </div>
+
+          <div style={{ height: 4, borderRadius: 2, background: THEME.border, marginBottom: 24, overflow: "hidden" }}>
+            <div style={{ height: "100%", width: `${((idx + (isFlipped ? 1 : 0.5)) / queue.length) * 100}%`, background: THEME.gradient3, transition: "width 0.4s ease", borderRadius: 2 }} />
+          </div>
+
+          {/* Flashcard with Flip Animation */}
+          <div
+            className="vm-card"
+            onClick={() => setIsFlipped(!isFlipped)}
+            style={{
+              padding: 24,
+              marginBottom: 20,
+              minHeight: 320,
+              cursor: "pointer",
+              position: "relative",
+              transition: "transform 0.3s ease",
+              transform: isFlipped ? "rotateY(0deg)" : "rotateY(0deg)"
+            }}
+          >
+            {/* FRONT SIDE - Term only */}
+            {!isFlipped && (
+              <div style={{
+                display: "flex",
+                flexDirection: "column",
+                alignItems: "center",
+                justifyContent: "center",
+                minHeight: 280,
+                textAlign: "center",
+                animation: "vmFadeIn 0.3s ease"
+              }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: THEME.textMuted, textTransform: "uppercase", letterSpacing: 1, marginBottom: 16 }}>
+                  ENGLISH WORD
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 12 }}>
+                  <div style={{ fontSize: 48, fontWeight: 900, color: THEME.accent, lineHeight: 1.2 }}>
+                    {currentWord.term}
+                  </div>
+                  <button
+                    className="vm-btn"
+                    onClick={(e) => { e.stopPropagation(); speakWord(); }}
+                    style={{
+                      background: `${THEME.info}15`,
+                      color: THEME.info,
+                      fontSize: 24,
+                      padding: "8px 12px",
+                      borderRadius: 12,
+                      border: `2px solid ${THEME.info}30`,
+                      cursor: "pointer"
+                    }}
+                    title="Listen to pronunciation"
+                  >
+                    🔊
+                  </button>
+                </div>
+                {currentWord.phonetic && (
+                  <div style={{ fontSize: 18, color: THEME.textSecondary, fontStyle: "italic", marginBottom: 16 }}>
+                    {currentWord.phonetic}
+                  </div>
+                )}
+                {currentWord.partOfSpeech && (
+                  <div className="vm-tag" style={{
+                    background: `${THEME.info}15`,
+                    color: THEME.info,
+                    fontSize: 13,
+                    padding: "6px 16px"
+                  }}>
+                    {currentWord.partOfSpeech}
+                  </div>
+                )}
+                <div style={{
+                  marginTop: 40,
+                  padding: "12px 24px",
+                  borderRadius: 12,
+                  background: `${THEME.info}08`,
+                  fontSize: 13,
+                  color: THEME.textSecondary
+                }}>
+                  👆 Tap to see meaning
+                </div>
+              </div>
+            )}
+
+            {/* BACK SIDE - Definition + Examples + Synonyms */}
+            {isFlipped && (
+              <div style={{ animation: "vmFadeIn 0.3s ease" }}>
+                {/* Term (smaller) */}
+                <div style={{ marginBottom: 20, textAlign: "center" }}>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 12, marginBottom: 4 }}>
+                    <div style={{ fontSize: 24, fontWeight: 700, color: THEME.accent }}>
+                      {currentWord.term}
+                    </div>
+                    <button
+                      className="vm-btn"
+                      onClick={(e) => { e.stopPropagation(); speakWord(); }}
+                      style={{
+                        background: `${THEME.info}15`,
+                        color: THEME.info,
+                        fontSize: 18,
+                        padding: "6px 10px",
+                        borderRadius: 10,
+                        border: `2px solid ${THEME.info}30`,
+                        cursor: "pointer"
+                      }}
+                      title="Listen to pronunciation"
+                    >
+                      🔊
+                    </button>
+                  </div>
+                  {currentWord.phonetic && (
+                    <div style={{ fontSize: 14, color: THEME.textSecondary, fontStyle: "italic" }}>
+                      {currentWord.phonetic}
+                    </div>
+                  )}
+                </div>
+
+                {/* Divider */}
+                <div style={{
+                  height: 1,
+                  background: `linear-gradient(90deg, transparent, ${THEME.border}, transparent)`,
+                  margin: "16px 0"
+                }} />
+
+                {/* Definition */}
+                <div style={{ marginBottom: 16 }}>
+                  <div style={{ fontSize: 11, fontWeight: 700, color: THEME.textMuted, textTransform: "uppercase", letterSpacing: 1, marginBottom: 8 }}>
+                    MEANING
+                  </div>
+                  <div style={{ fontSize: 18, fontWeight: 500, lineHeight: 1.6 }}>
+                    {currentWord.definition}
+                  </div>
+                </div>
+
+                {/* Examples */}
+                {currentWord.examples && currentWord.examples.length > 0 && (
+                  <div style={{ marginBottom: 16 }}>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: THEME.textMuted, marginBottom: 8 }}>
+                      💡 EXAMPLES
+                    </div>
+                    {currentWord.examples.slice(0, 2).map((ex, i) => (
+                      <div key={i} style={{
+                        padding: 10,
+                        borderRadius: 8,
+                        background: THEME.surface,
+                        borderLeft: `3px solid ${THEME.success}40`,
+                        fontSize: 13,
+                        color: THEME.textSecondary,
+                        fontStyle: "italic",
+                        marginBottom: 8
+                      }}>
+                        "{ex}"
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Synonyms */}
+                {currentWord.synonyms && currentWord.synonyms.length > 0 && (
+                  <div>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: THEME.textMuted, marginBottom: 8 }}>
+                      📚 SYNONYMS
+                    </div>
+                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                      {currentWord.synonyms.map((syn, i) => (
+                        <span key={i} className="vm-tag" style={{
+                          background: `${THEME.accent}10`,
+                          color: THEME.accent,
+                          fontSize: 12
+                        }}>
+                          {syn}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                <div style={{
+                  marginTop: 16,
+                  padding: "10px",
+                  borderRadius: 10,
+                  background: `${THEME.info}08`,
+                  fontSize: 12,
+                  color: THEME.textSecondary,
+                  textAlign: "center"
+                }}>
+                  👆 Tap again to flip back
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Recognition Assessment - Only show after flipping */}
+          {phase === "think" && isFlipped && (
+            <div style={{ animation: "vmFadeIn 0.3s ease" }}>
+              <div style={{
+                fontSize: 13,
+                fontWeight: 600,
+                color: THEME.textSecondary,
+                marginBottom: 12,
+                textAlign: "center"
+              }}>
+                How well do you recognize this word?
+              </div>
+
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+                <button
+                  className="vm-btn"
+                  onClick={(e) => { e.stopPropagation(); handleRate("again"); setIsFlipped(false); }}
+                  style={{
+                    padding: 16,
+                    borderRadius: 14,
+                    background: `${THEME.danger}15`,
+                    color: THEME.danger,
+                    fontSize: 15,
+                    border: `1.5px solid ${THEME.danger}30`,
+                  }}
+                >
+                  ❌ New to me
+                </button>
+                <button
+                  className="vm-btn"
+                  onClick={(e) => { e.stopPropagation(); handleRate("hard"); setIsFlipped(false); }}
+                  style={{
+                    padding: 16,
+                    borderRadius: 14,
+                    background: `${THEME.warning}15`,
+                    color: THEME.warning,
+                    fontSize: 15,
+                    border: `1.5px solid ${THEME.warning}30`,
+                  }}
+                >
+                  ⚠️ Seen before
+                </button>
+                <button
+                  className="vm-btn"
+                  onClick={(e) => { e.stopPropagation(); handleRate("good"); setIsFlipped(false); }}
+                  style={{
+                    padding: 16,
+                    borderRadius: 14,
+                    background: `${THEME.success}15`,
+                    color: THEME.success,
+                    fontSize: 15,
+                    border: `1.5px solid ${THEME.success}30`,
+                  }}
+                >
+                  ✅ Familiar
+                </button>
+                <button
+                  className="vm-btn"
+                  onClick={(e) => { e.stopPropagation(); handleRate("easy"); setIsFlipped(false); }}
+                  style={{
+                    padding: 16,
+                    borderRadius: 14,
+                    background: `${THEME.accent}15`,
+                    color: THEME.accent,
+                    fontSize: 15,
+                    border: `1.5px solid ${THEME.accent}30`,
+                  }}
+                >
+                  🎯 Know well
+                </button>
+              </div>
+
+              <div className="vm-card" style={{
+                padding: 12,
+                marginTop: 16,
+                background: `${THEME.info}08`,
+                textAlign: "center"
+              }}>
+                <div style={{ fontSize: 12, color: THEME.textSecondary }}>
+                  💡 <strong>Tip:</strong> Read carefully, then rate honestly. This helps the system schedule reviews optimally.
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
     // Active Recall Mode
     if (mode === "recall") return (
       <div style={{ padding: "20px 16px 100px", maxWidth: 480, margin: "0 auto", animation: "vmFadeIn 0.3s ease" }}>
@@ -1411,6 +1933,74 @@ export default function VocabMasterPro({
         
         {phase === "think" && (
           <div style={{ animation: "vmFadeIn 0.3s ease" }}>
+            {/* Hint Cards */}
+            {shownHints.map((hint, i) => {
+              const hintColors = {
+                1: { bg: `${THEME.info}10`, border: `${THEME.info}30`, text: THEME.info },
+                2: { bg: `${THEME.warning}10`, border: `${THEME.warning}30`, text: THEME.warning },
+                3: { bg: `${THEME.accent}10`, border: `${THEME.accent}30`, text: THEME.accent },
+                4: { bg: `${THEME.danger}10`, border: `${THEME.danger}30`, text: THEME.danger },
+              };
+              const colors = hintColors[hint.level];
+
+              return (
+                <div key={i} className="vm-card" style={{
+                  padding: 14,
+                  marginBottom: 12,
+                  background: colors.bg,
+                  border: `1.5px solid ${colors.border}`,
+                  animation: "vmSlideDown 0.3s ease",
+                }}>
+                  <div style={{ fontSize: 12, fontWeight: 700, color: colors.text, marginBottom: 6, display: "flex", alignItems: "center", gap: 6 }}>
+                    {hint.level === 1 && "🔊"} {hint.level === 2 && "📖"} {hint.level === 3 && "✏️"} {hint.level === 4 && "🎯"}
+                    <span>Hint {hint.level}/4</span>
+                  </div>
+                  {hint.type === "pronunciation" && (
+                    <div style={{ fontSize: 16, fontWeight: 600, color: colors.text }}>{hint.content}</div>
+                  )}
+                  {hint.type === "example" && (
+                    <div style={{ fontSize: 14, color: THEME.textSecondary, fontStyle: "italic" }}>"{hint.content}"</div>
+                  )}
+                  {hint.type === "firstLetter" && (
+                    <div style={{ fontSize: 14, fontWeight: 600, color: colors.text }}>{hint.content}</div>
+                  )}
+                  {hint.type === "multipleChoice" && (
+                    <div style={{ marginTop: 8 }}>
+                      {mcChoices.map((choice, idx) => (
+                        <button
+                          key={idx}
+                          className="vm-btn"
+                          onClick={() => selectMCOption(choice)}
+                          style={{
+                            width: "100%",
+                            padding: 12,
+                            marginBottom: 8,
+                            borderRadius: 10,
+                            background: selectedMCOption === choice ? `${THEME.success}20` : THEME.surface,
+                            border: `1.5px solid ${selectedMCOption === choice ? THEME.success : THEME.border}`,
+                            color: selectedMCOption === choice ? THEME.success : THEME.text,
+                            fontWeight: selectedMCOption === choice ? 700 : 500,
+                            fontSize: 15,
+                            textAlign: "left",
+                            display: "flex",
+                            alignItems: "center",
+                            gap: 8,
+                          }}
+                        >
+                          <span style={{ opacity: 0.5 }}>{String.fromCharCode(65 + idx)})</span>
+                          <span>{choice}</span>
+                          {selectedMCOption === choice && <span style={{ marginLeft: "auto" }}>✓</span>}
+                        </button>
+                      ))}
+                      <div style={{ fontSize: 12, color: THEME.textMuted, marginTop: 8, fontStyle: "italic" }}>
+                        ⚠️ Type the word below to confirm
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })}
+
             <div style={{ position: "relative", marginBottom: 16 }}>
               <input ref={inputRef} className="vm-input" value={typedAnswer} onChange={e => setTypedAnswer(e.target.value)}
                 onKeyDown={e => e.key === "Enter" && typedAnswer.trim() && checkTyped()}
@@ -1418,6 +2008,27 @@ export default function VocabMasterPro({
                 style={{ fontSize: 18, padding: "16px 20px", textAlign: "center", fontWeight: 600 }}
               />
             </div>
+
+            {/* Hint Button */}
+            {currentHintLevel < 4 && (
+              <div style={{ marginBottom: 16, textAlign: "center" }}>
+                <div style={{ fontSize: 12, color: THEME.textMuted, marginBottom: 8 }}>
+                  💡 {currentHintLevel === 0 ? "Need a hint?" : "Still struggling?"} ({hintsUsed}/4 used)
+                </div>
+                <button className="vm-btn" onClick={showNextHint} style={{
+                  padding: "12px 24px",
+                  borderRadius: 12,
+                  background: `${THEME.warning}15`,
+                  color: THEME.warning,
+                  fontSize: 14,
+                  fontWeight: 600,
+                  border: `1.5px solid ${THEME.warning}30`,
+                }}>
+                  {currentHintLevel === 0 ? "Show Hint" : currentHintLevel === 3 ? "Show Choices..." : "Next Hint"}
+                </button>
+              </div>
+            )}
+
             <button className="vm-btn" onClick={checkTyped} disabled={!typedAnswer.trim()} style={{
               width: "100%", padding: 16, borderRadius: 14,
               background: typedAnswer.trim() ? THEME.gradient2 : THEME.border,
@@ -1444,8 +2055,30 @@ export default function VocabMasterPro({
                   <span style={{ fontWeight: 700, color: THEME.text, fontSize: 18 }}>{currentWord.term}</span>
                 </div>
               )}
+
+              {/* Show hint usage and score */}
+              {isCorrect && hintsUsed > 0 && (
+                <div style={{ marginTop: 12, paddingTop: 12, borderTop: `1px solid ${THEME.border}` }}>
+                  <div style={{ fontSize: 12, color: THEME.textMuted, marginBottom: 4 }}>
+                    💡 Used {hintsUsed} hint{hintsUsed > 1 ? "s" : ""}
+                  </div>
+                  <div style={{ fontSize: 14, fontWeight: 600 }}>
+                    {"⭐".repeat(5 - hintsUsed)}{"☆".repeat(hintsUsed)} {" "}
+                    {hintsUsed === 1 ? "(Excellent)" : hintsUsed === 2 ? "(Good)" : hintsUsed === 3 ? "(Fair)" : "(Needs practice)"}
+                  </div>
+                  <div style={{ fontSize: 12, color: THEME.accent, marginTop: 4 }}>
+                    XP: {getXPFromHints(isCorrect, hintsUsed) > 0 ? "+" : ""}{getXPFromHints(isCorrect, hintsUsed)}
+                  </div>
+                </div>
+              )}
             </div>
-            <RatingButtons onRate={handleRate} showEasy={isCorrect} word={currentWord} />
+
+            <RatingButtons
+              onRate={handleRate}
+              showEasy={isCorrect && hintsUsed === 0}
+              showGood={isCorrect && hintsUsed < 3}
+              word={currentWord}
+            />
           </div>
         )}
       </div>
@@ -1684,6 +2317,7 @@ export default function VocabMasterPro({
     const [currentBatchIndex, setCurrentBatchIndex] = useState(0);
 
     const startReview = (batchIndex = 0) => {
+      isInLearningSession.current = true;
       let allWords;
       if (focusMode) {
         // Focus mode: prioritize weak words (high failure rate)
@@ -1768,19 +2402,86 @@ export default function VocabMasterPro({
       setSessionHistory(prev => [...prev, { word: currentWord, rating, isGood }]);
 
       if (idx + 1 >= queue.length) {
-        // Batch update SRS for all reviewed words
-        sessionResults.forEach(result => {
-          if (result.wordId) {
-            updateWordSRS(result.wordId, result.rating);
-          }
-        });
-        // Update current word
-        updateWordSRS(currentWord.id, rating);
+        // Collect ALL words including current one for batch update
+        const allResults = [...sessionResults, { wordId: currentWord.id, rating }];
+
+        // ⚠️ Set flag to prevent Firestore listener interference
+        isSyncingFromFirestore.current = true;
+
+        // ✅ Compute SRS updates WITHOUT calling setWords (avoid parent re-render)
+        const wordsToSave = allResults.map(result => {
+          const w = words.find(word => word.id === result.wordId);
+          if (!w) return null;
+          const quality = SRSEngine.qualityFromRating(result.rating);
+          return { ...w, srs: SRSEngine.processReview(w, quality) };
+        }).filter(Boolean);
+
+        // ✅ Store pending updates in ref (will apply when user exits review)
+        const prevPending = pendingReviewUpdate.current;
+        pendingReviewUpdate.current = {
+          allResults,
+          wordsToSave: prevPending ? [...prevPending.wordsToSave, ...wordsToSave] : wordsToSave,
+          allResultsAccum: prevPending ? [...prevPending.allResultsAccum, ...allResults] : allResults,
+        };
+
+        // ✅ Set session done (local state only, no parent re-render)
         setSessionDone(true);
+
+        // ✅ Batch save to Firestore (async, non-blocking)
+        if (firestoreService && userId && wordsToSave.length > 0) {
+          setTimeout(async () => {
+            try {
+              await firestoreService.saveWords(wordsToSave);
+              console.log(`✅ Review batch saved: ${wordsToSave.length} words`);
+            } catch (error) {
+              console.error('❌ Review batch save error:', error);
+            }
+          }, 100);
+        }
       } else {
         setIdx(i => i + 1);
         setFlipped(false);
       }
+    };
+
+    // Apply deferred setWords/setStats when user exits review
+    const applyPendingReviewUpdates = () => {
+      const pending = pendingReviewUpdate.current;
+      if (!pending) return;
+
+      const { wordsToSave, allResultsAccum } = pending;
+
+      // Now safe to update parent state (user is leaving review)
+      setWords(prev => prev.map(w => {
+        const updated = wordsToSave.find(u => u.id === w.id);
+        return updated || w;
+      }));
+
+      updateStreak();
+      setStats(prev => {
+        const totalXP = allResultsAccum.reduce((sum, result) => {
+          const quality = SRSEngine.qualityFromRating(result.rating);
+          return sum + (quality >= 4 ? 15 : quality >= 3 ? 10 : 5);
+        }, 0);
+
+        const newTodayReviews = (prev.todayDate === new Date().toDateString() ? prev.todayReviews : 0) + allResultsAccum.length;
+        const dailyGoal = prev.dailyGoal || 20;
+
+        if (newTodayReviews >= dailyGoal && (prev.todayReviews < dailyGoal)) {
+          setTimeout(() => showToast(`🎉 Daily goal reached! ${dailyGoal} reviews completed!`, "success"), 300);
+        }
+
+        return {
+          ...prev,
+          totalReviews: prev.totalReviews + allResultsAccum.length,
+          todayReviews: newTodayReviews,
+          todayDate: new Date().toDateString(),
+          xp: prev.xp + totalXP,
+        };
+      });
+
+      pendingReviewUpdate.current = null;
+      isSyncingFromFirestore.current = false;
     };
 
     console.log('🔍 ReviewScreen state:', { started, sessionDone, wordsLength: words?.length });
@@ -1882,7 +2583,7 @@ export default function VocabMasterPro({
             </button>
           </div>
 
-          <button className="vm-btn" onClick={startReview} style={{
+          <button className="vm-btn" onClick={() => startReview(0)} style={{
             padding: "16px 48px", borderRadius: 14, background: THEME.gradient2, color: "#fff", fontSize: 16,
           }}>Start Review</button>
         </div>
@@ -1975,14 +2676,14 @@ export default function VocabMasterPro({
                 }}>
                   Continue Next Batch →
                 </button>
-                <button className="vm-btn" onClick={() => { setStarted(false); setScreen("home"); }} style={{
+                <button className="vm-btn" onClick={() => { applyPendingReviewUpdates(); isInLearningSession.current = false; setStarted(false); setScreen("home"); }} style={{
                   flex: 1, padding: 16, borderRadius: 14, background: THEME.card, color: THEME.text, fontSize: 15, border: `1px solid ${THEME.border}`,
                 }}>
                   Finish
                 </button>
               </>
             ) : (
-              <button className="vm-btn" onClick={() => { setStarted(false); setScreen("home"); }} style={{
+              <button className="vm-btn" onClick={() => { applyPendingReviewUpdates(); isInLearningSession.current = false; setStarted(false); setScreen("home"); }} style={{
                 width: "100%", padding: 16, borderRadius: 14, background: THEME.gradient2, color: "#fff", fontSize: 15,
               }}>
                 Finish
@@ -2003,7 +2704,7 @@ export default function VocabMasterPro({
     return (
       <div style={{ padding: "20px 16px 100px", maxWidth: 480, margin: "0 auto" }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 20 }}>
-          <button className="vm-btn" onClick={() => setStarted(false)} style={{ background: "none", color: THEME.textSecondary, fontSize: 22, padding: 4 }}>←</button>
+          <button className="vm-btn" onClick={() => { applyPendingReviewUpdates(); isInLearningSession.current = false; setStarted(false); }} style={{ background: "none", color: THEME.textSecondary, fontSize: 22, padding: 4 }}>←</button>
           <div style={{ fontSize: 13, fontWeight: 600, color: THEME.textSecondary }}>{idx + 1} / {queue.length}</div>
         </div>
         
@@ -2688,11 +3389,10 @@ export default function VocabMasterPro({
       if (newWords.length > 0) {
         setWords(prev => [...prev, ...newWords]);
 
-        // Save to Firestore if available
+        // Save to Firestore if available (OPTIMIZED: uses writeBatch)
         if (firestoreService && userId) {
           showToast(`💾 Saving ${newWords.length} words to Firestore...`, "warning");
-          const promises = newWords.map(word => firestoreService.saveWord(word));
-          await Promise.all(promises);
+          await firestoreService.saveWords(newWords);
           showToast(`✅ Imported ${newWords.length} words!`, "success");
         } else {
           showToast(`✅ Imported ${newWords.length} words!`, "success");
@@ -3102,8 +3802,7 @@ export default function VocabMasterPro({
         // Save to Firestore if available
         if (firestoreService && userId && data.words?.length > 0) {
           showToast(`💾 Saving ${data.words.length} words to Firestore...`, "warning");
-          const promises = data.words.map(word => firestoreService.saveWord(word));
-          await Promise.all(promises);
+          await firestoreService.saveWords(data.words);
           showToast("✅ Data imported successfully!", "success");
         } else {
           showToast("✅ Data imported successfully!", "success");
@@ -3123,8 +3822,7 @@ export default function VocabMasterPro({
         // Save to Firestore if available
         if (firestoreService && userId && data.words?.length > 0) {
           showToast(`💾 Saving ${data.words.length} words to Firestore...`, "warning");
-          const promises = data.words.map(word => firestoreService.saveWord(word));
-          await Promise.all(promises);
+          await firestoreService.saveWords(data.words);
           showToast("✅ Backup restored!", "success");
         } else {
           showToast("✅ Backup restored!", "success");
@@ -3358,15 +4056,31 @@ export default function VocabMasterPro({
   };
   const CurrentScreen = screens[screen] || HomeScreen;
 
+  // Show loading screen while waiting for Firestore initial data
+  if (!dataReady) {
+    return (
+      <div className="vm-app" style={{
+        minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center",
+        background: THEME.bg, color: THEME.text,
+      }}>
+        <div style={{ textAlign: "center", animation: "vmFadeIn 0.3s ease" }}>
+          <div style={{ fontSize: 48, marginBottom: 16, animation: "vmPulse 1.5s ease infinite" }}>📚</div>
+          <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 8 }}>Loading your data...</div>
+          <div style={{ fontSize: 13, color: THEME.textSecondary }}>Syncing from cloud</div>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="vm-app" style={{ position: "relative", minHeight: "100vh", paddingBottom: 80 }}>
       {/* Background ambience */}
       <div style={{
         position: "fixed", top: 0, left: 0, right: 0, bottom: 0, pointerEvents: "none", zIndex: 0,
-        background: `radial-gradient(ellipse at 20% 20%, ${THEME.accent}06 0%, transparent 60%), 
+        background: `radial-gradient(ellipse at 20% 20%, ${THEME.accent}06 0%, transparent 60%),
                       radial-gradient(ellipse at 80% 80%, ${THEME.success}04 0%, transparent 60%)`,
       }} />
-      
+
       {/* Content */}
       <div style={{ position: "relative", zIndex: 1 }}>
         <CurrentScreen />

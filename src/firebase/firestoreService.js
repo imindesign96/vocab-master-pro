@@ -7,9 +7,8 @@ import {
   getDocs,
   deleteDoc,
   onSnapshot,
-  query,
-  orderBy,
-  serverTimestamp
+  serverTimestamp,
+  writeBatch
 } from 'firebase/firestore';
 import { db } from './config';
 
@@ -35,12 +34,38 @@ export const saveWord = async (userId, word) => {
 };
 
 /**
- * Batch save multiple words
+ * Batch save multiple words (OPTIMIZED - uses writeBatch)
+ * Firestore limit: 500 operations per batch
  */
 export const saveWords = async (userId, words) => {
   try {
-    const promises = words.map(word => saveWord(userId, word));
-    await Promise.all(promises);
+    console.log(`📦 Batch saving ${words.length} words...`);
+
+    // Split into chunks of 500 (Firestore batch limit)
+    const chunkSize = 500;
+    const chunks = [];
+    for (let i = 0; i < words.length; i += chunkSize) {
+      chunks.push(words.slice(i, i + chunkSize));
+    }
+
+    // Process each chunk with writeBatch
+    for (let i = 0; i < chunks.length; i++) {
+      const chunk = chunks[i];
+      const batch = writeBatch(db);
+
+      chunk.forEach(word => {
+        const wordRef = doc(db, 'users', userId, 'words', word.id);
+        batch.set(wordRef, {
+          ...word,
+          updatedAt: serverTimestamp()
+        }, { merge: true });
+      });
+
+      await batch.commit();
+      console.log(`✅ Batch ${i + 1}/${chunks.length} saved (${chunk.length} words)`);
+    }
+
+    console.log(`✅ All ${words.length} words saved successfully`);
     return { success: true };
   } catch (error) {
     console.error('Error batch saving words:', error);
@@ -84,9 +109,9 @@ export const getWords = async (userId) => {
  */
 export const subscribeToWords = (userId, callback) => {
   const wordsRef = collection(db, 'users', userId, 'words');
-  const q = query(wordsRef, orderBy('updatedAt', 'desc'));
 
-  return onSnapshot(q, (snapshot) => {
+  // Don't use orderBy('updatedAt') - it EXCLUDES documents without updatedAt field
+  return onSnapshot(wordsRef, (snapshot) => {
     const words = snapshot.docs.map(doc => ({
       id: doc.id,
       ...doc.data()
