@@ -575,6 +575,8 @@ export default function VocabMasterPro({
 } = {}) {
   // Ref to prevent save loop when syncing from Firestore
   const isSyncingFromFirestore = useRef(false);
+  // Ref to pause Firestore updates during learning session
+  const isInLearningSession = useRef(false);
 
   // State
   const [words, setWords] = useState(() => {
@@ -629,6 +631,12 @@ export default function VocabMasterPro({
 
     // Subscribe to words
     const unsubscribeWords = firestoreService.subscribeToWords((firestoreWords) => {
+      // Skip updates during learning session to prevent re-renders
+      if (isInLearningSession.current) {
+        console.log('⏸️ Skipping Firestore sync (learning session in progress)');
+        return;
+      }
+
       isSyncingFromFirestore.current = true; // Set flag before updating state
 
       if (firestoreWords.length > 0) {
@@ -647,6 +655,12 @@ export default function VocabMasterPro({
 
     // Subscribe to stats
     const unsubscribeStats = firestoreService.subscribeToStats((firestoreStats) => {
+      // Skip updates during learning session to prevent re-renders
+      if (isInLearningSession.current) {
+        console.log('⏸️ Skipping stats sync (learning session in progress)');
+        return;
+      }
+
       if (Object.keys(firestoreStats).length > 0) {
         isSyncingFromFirestore.current = true;
         console.log('✅ Synced stats from Firestore');
@@ -721,7 +735,7 @@ export default function VocabMasterPro({
     });
   }, []);
   
-  // Update word after review
+  // Update word after review (full update - use outside of learning sessions)
   const updateWordSRS = useCallback((wordId, rating) => {
     const quality = SRSEngine.qualityFromRating(rating);
     setWords(prev => prev.map(w => {
@@ -752,6 +766,18 @@ export default function VocabMasterPro({
       };
     });
   }, [updateStreak, firestoreService, userId, showToast]);
+
+  // Update word during learning session (NO Firestore, NO parent state - pure calculation only!)
+  const updateWordSRSInSession = useCallback((word, rating) => {
+    const quality = SRSEngine.qualityFromRating(rating);
+    const updated = { ...word, srs: SRSEngine.processReview(word, quality) };
+
+    // ⚠️ DO NOT save to Firestore here!
+    // Firestore subscription would trigger re-render and reset LearnScreen
+    // Will batch save all updates when session ends
+
+    return { updated, quality };
+  }, []);
   
   // Computed
   const dueWords = useMemo(() => words.filter(w => SRSEngine.isDueForReview(w)), [words]);
@@ -943,25 +969,54 @@ export default function VocabMasterPro({
     const [typedAnswer, setTypedAnswer] = useState("");
     const [isCorrect, setIsCorrect] = useState(null);
     const [sessionStats, setSessionStats] = useState({ correct: 0, incorrect: 0 });
-    const [sessionResults, setSessionResults] = useState([]);
+    const [sessionHistory, setSessionHistory] = useState([]);
     const inputRef = useRef(null);
+    // Track session reviews for batch stats update at end (use ref to avoid re-renders)
+    const sessionReviewsRef = useRef([]);
+    // Batch learning - track all available words and current batch
+    const [allAvailableWords, setAllAvailableWords] = useState([]);
+    const [batchSize, setBatchSize] = useState(20);
+    const [currentBatchIndex, setCurrentBatchIndex] = useState(0);
     // Sentence Builder state
     const [sentenceWords, setSentenceWords] = useState([]);
     const [userSentence, setUserSentence] = useState([]);
     const [correctSentence, setCorrectSentence] = useState([]);
 
-    const startSession = (selectedMode) => {
+    const startSession = (selectedMode, batchIndex = 0) => {
+      // Pause Firestore updates during session to prevent re-renders
+      isInLearningSession.current = true;
+
       setMode(selectedMode);
-      // Smart selection: prioritize due words, then least reviewed (up to 50)
-      const selected = selectWordsForReview(words, dueWords, 50);
-      setQueue(selected);
+
+      // Get all available words for review (no limit)
+      const allWords = selectWordsForReview(words, dueWords, 1000);
+      setAllAvailableWords(allWords);
+      setCurrentBatchIndex(batchIndex);
+
+      // Load only current batch (20 words)
+      const startIdx = batchIndex * batchSize;
+      const endIdx = startIdx + batchSize;
+      const batchWords = allWords.slice(startIdx, endIdx);
+
+      setQueue(batchWords);
       setIdx(0);
       setPhase("think");
       setSessionStats({ correct: 0, incorrect: 0 });
-      setSessionResults([]);
+      setSessionHistory([]); // Reset session history for new batch
+      sessionReviewsRef.current = []; // Reset session reviews
       setTypedAnswer("");
       setIsCorrect(null);
       setUserSentence([]);
+    };
+
+    // Continue to next batch
+    const continueNextBatch = () => {
+      const nextBatchIndex = currentBatchIndex + 1;
+      const startIdx = nextBatchIndex * batchSize;
+
+      if (startIdx < allAvailableWords.length) {
+        startSession(mode, nextBatchIndex);
+      }
     };
 
     const generateSentence = (word) => {
@@ -992,29 +1047,31 @@ export default function VocabMasterPro({
     const handleRate = (rating) => {
       if (!currentWord) return;
 
-      // Store result for batch SRS update
-      setSessionResults(prev => [...prev, {
-        wordId: currentWord.id,
-        rating
-      }]);
+      // Save to Firestore only (no parent state updates to prevent re-render)
+      const { updated, quality } = updateWordSRSInSession(currentWord, rating);
 
+      // Track review for batch stats update at end
+      sessionReviewsRef.current.push({ quality, rating });
+
+      // Update the word in queue for immediate UI feedback
+      setQueue(prev => prev.map(w => w.id === currentWord.id ? updated : w));
+
+      // Update session stats (local state, safe)
       const isGood = rating === "good" || rating === "easy";
       setSessionStats(p => ({
         correct: p.correct + (isGood ? 1 : 0),
         incorrect: p.incorrect + (isGood ? 0 : 1),
       }));
 
+      // Track word in session history for review display
+      setSessionHistory(prev => [...prev, { word: currentWord, rating, isGood }]);
+
       if (idx + 1 >= queue.length) {
-        // Batch update SRS for all reviewed words
-        sessionResults.forEach(result => {
-          if (result.wordId) {
-            updateWordSRS(result.wordId, result.rating);
-          }
-        });
-        // Update current word
-        updateWordSRS(currentWord.id, rating);
+        // End of session - batch update parent stats
+        batchUpdateStats();
         setPhase("done");
       } else {
+        // Move to next word
         setIdx(i => i + 1);
         setPhase("think");
         setTypedAnswer("");
@@ -1027,6 +1084,60 @@ export default function VocabMasterPro({
       const correct = typedAnswer.trim().toLowerCase() === currentWord.term.toLowerCase();
       setIsCorrect(correct);
       setPhase("reveal");
+    };
+
+    // Batch update stats from all session reviews
+    const batchUpdateStats = () => {
+      const reviews = sessionReviewsRef.current;
+      if (reviews.length === 0) return;
+
+      // Update streak
+      updateStreak();
+
+      // Batch update stats
+      setStats(prev => {
+        const totalXP = reviews.reduce((sum, { quality }) =>
+          sum + (quality >= 4 ? 15 : quality >= 3 ? 10 : 5), 0);
+
+        const newTodayReviews = (prev.todayDate === new Date().toDateString() ? prev.todayReviews : 0) + reviews.length;
+        const dailyGoal = prev.dailyGoal || 20;
+
+        // Check if goal just reached
+        if (newTodayReviews >= dailyGoal && (prev.todayReviews < dailyGoal)) {
+          setTimeout(() => showToast(`🎉 Daily goal reached! ${dailyGoal} reviews completed!`, "success"), 300);
+        }
+
+        return {
+          ...prev,
+          totalReviews: prev.totalReviews + reviews.length,
+          xp: prev.xp + totalXP,
+        };
+      });
+    };
+
+    // Sync queue changes back to words state AND Firestore (for when exiting session)
+    const syncQueueToWords = () => {
+      setWords(prev => prev.map(w => {
+        const queueWord = queue.find(q => q.id === w.id);
+
+        // Batch save to Firestore if word was updated in queue
+        if (queueWord && queueWord.srs !== w.srs && firestoreService && userId) {
+          firestoreService.saveWord(queueWord);
+        }
+
+        return queueWord || w;
+      }));
+    };
+
+    // Exit session handler
+    const exitSession = () => {
+      batchUpdateStats(); // Update stats before exiting
+      syncQueueToWords(); // Sync queue to words + Firestore
+
+      // Resume Firestore updates after exiting
+      isInLearningSession.current = false;
+
+      setMode(null);
     };
 
     // Empty state - no words available
@@ -1050,19 +1161,47 @@ export default function VocabMasterPro({
     }
 
     // Mode Select
-    if (!mode) return (
-      <div style={{ padding: "20px 16px 100px", maxWidth: 480, margin: "0 auto", animation: "vmFadeIn 0.4s ease" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 28 }}>
-          <button className="vm-btn" onClick={() => setScreen("home")} style={{ background: "none", color: THEME.textSecondary, fontSize: 22, padding: 4 }}>←</button>
-          <div style={{ fontSize: 22, fontWeight: 800 }}>Choose Learning Mode</div>
-        </div>
-        
-        {[
-          { id: "recall", icon: "🧠", name: "Active Recall", desc: "See word → Think → Reveal → Rate", rec: true, color: THEME.accent },
-          { id: "type", icon: "⌨️", name: "Type Answer", desc: "See definition → Type the word → Check", color: THEME.success },
-          { id: "sentence", icon: "📝", name: "Sentence Builder", desc: "Build sentences using vocabulary words", color: THEME.warning },
-          { id: "listen", icon: "👂", name: "Listening", desc: "Hear pronunciation → Recall meaning → Rate", color: THEME.info },
-        ].map(m => (
+    if (!mode) {
+      const availableWords = selectWordsForReview(words || [], dueWords || [], 1000);
+      const totalAvailable = availableWords?.length || 0;
+      const totalBatches = batchSize > 0 ? Math.ceil(totalAvailable / batchSize) : 0;
+
+      return (
+        <div style={{ padding: "20px 16px 100px", maxWidth: 480, margin: "0 auto", animation: "vmFadeIn 0.4s ease" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 20 }}>
+            <button className="vm-btn" onClick={() => setScreen("home")} style={{ background: "none", color: THEME.textSecondary, fontSize: 22, padding: 4 }}>←</button>
+            <div style={{ fontSize: 22, fontWeight: 800 }}>Choose Learning Mode</div>
+          </div>
+
+          {/* Word count info */}
+          <div className="vm-card" style={{ padding: 16, marginBottom: 24, background: `${THEME.accent}08` }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+              <div style={{ fontSize: 36 }}>📚</div>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 24, fontWeight: 800, color: THEME.accent }}>{totalAvailable}</div>
+                <div style={{ fontSize: 13, color: THEME.textSecondary }}>
+                  {totalAvailable === 0 ? "No words to review" :
+                   totalAvailable <= batchSize ? "words ready to learn" :
+                   `words ready (${totalBatches} batches of ${batchSize})`}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {totalAvailable === 0 ? (
+            <div style={{ textAlign: "center", padding: "40px 20px" }}>
+              <div style={{ fontSize: 48, marginBottom: 16 }}>✅</div>
+              <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 8 }}>All caught up!</div>
+              <div style={{ fontSize: 14, color: THEME.textSecondary }}>No words due for review right now.</div>
+            </div>
+          ) : (
+            <>
+              {[
+                { id: "recall", icon: "🧠", name: "Active Recall", desc: "See word → Think → Reveal → Rate", rec: true, color: THEME.accent },
+                { id: "type", icon: "⌨️", name: "Type Answer", desc: "See definition → Type the word → Check", color: THEME.success },
+                { id: "sentence", icon: "📝", name: "Sentence Builder", desc: "Build sentences using vocabulary words", color: THEME.warning },
+                { id: "listen", icon: "👂", name: "Listening", desc: "Hear pronunciation → Recall meaning → Rate", color: THEME.info },
+              ].map(m => (
           <button key={m.id} className="vm-btn vm-card" onClick={() => startSession(m.id)} style={{
             width: "100%", padding: 20, marginBottom: 12, textAlign: "left",
             display: "flex", alignItems: "center", gap: 16,
@@ -1085,26 +1224,43 @@ export default function VocabMasterPro({
         <div className="vm-card" style={{ padding: 16, marginTop: 16, background: `${THEME.accent}08` }}>
           <div style={{ fontSize: 12, fontWeight: 700, color: THEME.accent, marginBottom: 6 }}>💡 Why Active Recall?</div>
           <div style={{ fontSize: 13, color: THEME.textSecondary, lineHeight: 1.6 }}>
-            Actively trying to remember <strong style={{ color: THEME.text }}>before</strong> seeing the answer 
+            Actively trying to remember <strong style={{ color: THEME.text }}>before</strong> seeing the answer
             increases retention by <strong style={{ color: THEME.success }}>3x</strong> compared to passive reading.
             Combined with Spaced Repetition (SM-2), this is the most scientifically proven method for long-term memory.
           </div>
         </div>
-      </div>
-    );
+              </>
+            )}
+          </div>
+        );
+    }
 
     // Session Complete
     if (phase === "done") {
       const total = sessionStats.correct + sessionStats.incorrect;
       const accuracy = total > 0 ? Math.round((sessionStats.correct / total) * 100) : 0;
+
+      // Check if there are more batches
+      const totalBatches = Math.ceil(allAvailableWords.length / batchSize);
+      const currentBatchNum = currentBatchIndex + 1;
+      const hasMoreBatches = (currentBatchIndex + 1) * batchSize < allAvailableWords.length;
+
       return (
         <div style={{ padding: "40px 16px 100px", maxWidth: 480, margin: "0 auto", textAlign: "center", animation: "vmBounceIn 0.5s ease" }}>
           <div style={{ fontSize: 64, marginBottom: 16 }}>{accuracy >= 80 ? "🎉" : accuracy >= 50 ? "👍" : "💪"}</div>
-          <div style={{ fontSize: 28, fontWeight: 800, marginBottom: 8 }}>Session Complete!</div>
-          <div style={{ fontSize: 15, color: THEME.textSecondary, marginBottom: 32 }}>
+          <div style={{ fontSize: 28, fontWeight: 800, marginBottom: 8 }}>Batch Complete!</div>
+          <div style={{ fontSize: 15, color: THEME.textSecondary, marginBottom: 8 }}>
             {accuracy >= 80 ? "Excellent work!" : accuracy >= 50 ? "Good progress!" : "Keep practicing!"}
           </div>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12, marginBottom: 32 }}>
+
+          {/* Batch progress */}
+          {allAvailableWords.length > batchSize && (
+            <div style={{ fontSize: 13, color: THEME.textSecondary, marginBottom: 24 }}>
+              Batch {currentBatchNum} of {totalBatches} completed
+            </div>
+          )}
+
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12, marginBottom: 24 }}>
             <div className="vm-card" style={{ padding: 16 }}>
               <div style={{ fontSize: 28, fontWeight: 800, color: THEME.accent }}>{total}</div>
               <div style={{ fontSize: 11, color: THEME.textMuted }}>Words</div>
@@ -1118,13 +1274,65 @@ export default function VocabMasterPro({
               <div style={{ fontSize: 11, color: THEME.textMuted }}>XP</div>
             </div>
           </div>
+
+          {/* Reviewed Words List */}
+          {sessionHistory.length > 0 && (
+            <div className="vm-card" style={{ padding: 16, marginBottom: 24, textAlign: "left", maxHeight: 300, overflowY: "auto" }}>
+              <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 12, textAlign: "center", color: THEME.text }}>
+                📝 Words Reviewed
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {sessionHistory.map((item, i) => (
+                  <div key={i} style={{
+                    display: "flex", alignItems: "center", gap: 12, padding: "8px 12px",
+                    background: item.isGood ? `${THEME.success}08` : `${THEME.warning}08`,
+                    borderRadius: 8, border: `1px solid ${item.isGood ? `${THEME.success}20` : `${THEME.warning}20`}`,
+                  }}>
+                    <div style={{ fontSize: 18 }}>{item.isGood ? "✓" : "✗"}</div>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: 15, fontWeight: 600, color: THEME.text }}>{item.word.term}</div>
+                      <div style={{ fontSize: 12, color: THEME.textSecondary }}>{item.word.definition}</div>
+                    </div>
+                    <div style={{
+                      fontSize: 10, fontWeight: 700, padding: "4px 8px", borderRadius: 6,
+                      background: item.rating === "easy" ? `${THEME.success}20` :
+                                 item.rating === "good" ? `${THEME.info}20` :
+                                 item.rating === "hard" ? `${THEME.warning}20` :
+                                 `${THEME.danger}20`,
+                      color: item.rating === "easy" ? THEME.success :
+                            item.rating === "good" ? THEME.info :
+                            item.rating === "hard" ? THEME.warning :
+                            THEME.danger,
+                    }}>
+                      {item.rating.toUpperCase()}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           <div style={{ display: "flex", gap: 12 }}>
-            <button className="vm-btn" onClick={() => startSession(mode)} style={{
-              flex: 1, padding: 16, borderRadius: 14, background: THEME.gradient1, color: "#fff", fontSize: 15,
-            }}>Learn More</button>
-            <button className="vm-btn" onClick={() => setScreen("home")} style={{
-              flex: 1, padding: 16, borderRadius: 14, background: THEME.card, color: THEME.text, fontSize: 15, border: `1px solid ${THEME.border}`,
-            }}>Home</button>
+            {hasMoreBatches ? (
+              <>
+                <button className="vm-btn" onClick={continueNextBatch} style={{
+                  flex: 1, padding: 16, borderRadius: 14, background: THEME.gradient1, color: "#fff", fontSize: 15,
+                }}>
+                  Continue Next Batch →
+                </button>
+                <button className="vm-btn" onClick={exitSession} style={{
+                  flex: 1, padding: 16, borderRadius: 14, background: THEME.card, color: THEME.text, fontSize: 15, border: `1px solid ${THEME.border}`,
+                }}>
+                  Finish
+                </button>
+              </>
+            ) : (
+              <button className="vm-btn" onClick={exitSession} style={{
+                width: "100%", padding: 16, borderRadius: 14, background: THEME.gradient1, color: "#fff", fontSize: 15,
+              }}>
+                Finish
+              </button>
+            )}
           </div>
         </div>
       );
@@ -1136,7 +1344,7 @@ export default function VocabMasterPro({
     if (mode === "recall") return (
       <div style={{ padding: "20px 16px 100px", maxWidth: 480, margin: "0 auto", animation: "vmFadeIn 0.3s ease" }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 20 }}>
-          <button className="vm-btn" onClick={() => setMode(null)} style={{ background: "none", color: THEME.textSecondary, fontSize: 22, padding: 4 }}>←</button>
+          <button className="vm-btn" onClick={exitSession} style={{ background: "none", color: THEME.textSecondary, fontSize: 22, padding: 4 }}>←</button>
           <div style={{ fontSize: 13, fontWeight: 600, color: THEME.textSecondary }}>{idx + 1} / {queue.length}</div>
           <div className="vm-mono" style={{ fontSize: 12, color: THEME.accent }}>Active Recall</div>
         </div>
@@ -1182,7 +1390,7 @@ export default function VocabMasterPro({
     if (mode === "type") return (
       <div style={{ padding: "20px 16px 100px", maxWidth: 480, margin: "0 auto", animation: "vmFadeIn 0.3s ease" }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 20 }}>
-          <button className="vm-btn" onClick={() => setMode(null)} style={{ background: "none", color: THEME.textSecondary, fontSize: 22, padding: 4 }}>←</button>
+          <button className="vm-btn" onClick={exitSession} style={{ background: "none", color: THEME.textSecondary, fontSize: 22, padding: 4 }}>←</button>
           <div style={{ fontSize: 13, fontWeight: 600, color: THEME.textSecondary }}>{idx + 1} / {queue.length}</div>
           <div className="vm-mono" style={{ fontSize: 12, color: THEME.success }}>Type Answer</div>
         </div>
@@ -1247,7 +1455,7 @@ export default function VocabMasterPro({
     if (mode === "listen") return (
       <div style={{ padding: "20px 16px 100px", maxWidth: 480, margin: "0 auto", animation: "vmFadeIn 0.3s ease" }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 20 }}>
-          <button className="vm-btn" onClick={() => setMode(null)} style={{ background: "none", color: THEME.textSecondary, fontSize: 22, padding: 4 }}>←</button>
+          <button className="vm-btn" onClick={exitSession} style={{ background: "none", color: THEME.textSecondary, fontSize: 22, padding: 4 }}>←</button>
           <div style={{ fontSize: 13, fontWeight: 600, color: THEME.textSecondary }}>{idx + 1} / {queue.length}</div>
           <div className="vm-mono" style={{ fontSize: 12, color: THEME.info }}>Listening</div>
         </div>
@@ -1311,7 +1519,7 @@ export default function VocabMasterPro({
       return (
         <div style={{ padding: "20px 16px 100px", maxWidth: 480, margin: "0 auto", animation: "vmFadeIn 0.3s ease" }}>
           <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 20 }}>
-            <button className="vm-btn" onClick={() => { setMode(null); setUserSentence([]); setSentenceWords([]); }} style={{ background: "none", color: THEME.textSecondary, fontSize: 22, padding: 4 }}>←</button>
+            <button className="vm-btn" onClick={() => { exitSession(); setUserSentence([]); setSentenceWords([]); }} style={{ background: "none", color: THEME.textSecondary, fontSize: 22, padding: 4 }}>←</button>
             <div style={{ fontSize: 13, fontWeight: 600, color: THEME.textSecondary }}>{idx + 1} / {queue.length}</div>
             <div className="vm-mono" style={{ fontSize: 12, color: THEME.warning }}>Sentence Builder</div>
           </div>
@@ -1458,6 +1666,8 @@ export default function VocabMasterPro({
 
   // ── REVIEW SCREEN (Flashcards + SRS) ────────────────────────
   const ReviewScreen = () => {
+    console.log('🔍 ReviewScreen rendering, words.length:', words?.length);
+
     const [queue, setQueue] = useState([]);
     const [idx, setIdx] = useState(0);
     const [flipped, setFlipped] = useState(false);
@@ -1465,10 +1675,16 @@ export default function VocabMasterPro({
     const [sessionDone, setSessionDone] = useState(false);
     const [sessionStats, setSessionStats] = useState({ correct: 0, incorrect: 0 });
     const [sessionResults, setSessionResults] = useState([]);
+    const [sessionHistory, setSessionHistory] = useState([]);
     const [focusMode, setFocusMode] = useState(false);
 
-    const startReview = () => {
-      let q;
+    // Batch learning state
+    const [allAvailableWords, setAllAvailableWords] = useState([]);
+    const [batchSize] = useState(20);
+    const [currentBatchIndex, setCurrentBatchIndex] = useState(0);
+
+    const startReview = (batchIndex = 0) => {
+      let allWords;
       if (focusMode) {
         // Focus mode: prioritize weak words (high failure rate)
         const weakWords = words
@@ -1485,35 +1701,71 @@ export default function VocabMasterPro({
             return bRate - aRate; // Highest failure rate first
           });
 
-        q = weakWords.length > 0 ? weakWords.slice(0, 100) : selectWordsForReview(words, dueWords, 100);
-        if (weakWords.length > 0) {
-          showToast(`🎯 Focusing on ${q.length} weak words`, "info");
+        allWords = weakWords.length > 0 ? weakWords : selectWordsForReview(words, dueWords, 1000);
+        if (weakWords.length > 0 && batchIndex === 0) {
+          showToast(`🎯 Focusing on ${allWords.length} weak words`, "info");
         }
       } else {
-        // Normal mode: prioritize due words, then least reviewed (up to 100)
-        q = selectWordsForReview(words, dueWords, 100);
+        // Normal mode: prioritize due words, then least reviewed
+        allWords = selectWordsForReview(words, dueWords, 1000);
       }
 
-      setQueue(q);
+      console.log('🚀 startReview: allWords.length =', allWords.length, 'words.length =', words.length, 'dueWords.length =', dueWords.length);
+
+      // Check if there are any words to review
+      if (allWords.length === 0) {
+        showToast('⚠️ No words available for review', 'warning');
+        return;
+      }
+
+      setAllAvailableWords(allWords);
+      setCurrentBatchIndex(batchIndex);
+
+      // Load only current batch (20 words)
+      console.log('🔍 DEBUG: batchSize =', batchSize, 'type:', typeof batchSize);
+      const actualBatchSize = batchSize || 20;
+      const startIdx = (batchIndex || 0) * actualBatchSize;
+      const endIdx = startIdx + actualBatchSize;
+      const batchWords = allWords.slice(startIdx, endIdx);
+
+      console.log('📦 startReview: batchWords.length =', batchWords.length, 'startIdx =', startIdx, 'endIdx =', endIdx, 'actualBatchSize =', actualBatchSize);
+
+      setQueue(batchWords);
       setIdx(0);
       setFlipped(false);
       setStarted(true);
       setSessionDone(false);
       setSessionStats({ correct: 0, incorrect: 0 });
       setSessionResults([]);
+      setSessionHistory([]);
+    };
+
+    const continueNextBatch = () => {
+      const nextBatchIndex = currentBatchIndex + 1;
+      const actualBatchSize = batchSize || 20;
+      const startIdx = nextBatchIndex * actualBatchSize;
+
+      if (startIdx < allAvailableWords.length) {
+        startReview(nextBatchIndex);
+      }
     };
 
     const handleRate = (rating) => {
       if (!queue[idx]) return;
 
+      const currentWord = queue[idx];
+
       // Store result for batch SRS update
       setSessionResults(prev => [...prev, {
-        wordId: queue[idx].id,
+        wordId: currentWord.id,
         rating
       }]);
 
       const isGood = rating === "good" || rating === "easy";
       setSessionStats(p => ({ correct: p.correct + (isGood ? 1 : 0), incorrect: p.incorrect + (isGood ? 0 : 1) }));
+
+      // Track word in session history for review display
+      setSessionHistory(prev => [...prev, { word: currentWord, rating, isGood }]);
 
       if (idx + 1 >= queue.length) {
         // Batch update SRS for all reviewed words
@@ -1523,7 +1775,7 @@ export default function VocabMasterPro({
           }
         });
         // Update current word
-        updateWordSRS(queue[idx].id, rating);
+        updateWordSRS(currentWord.id, rating);
         setSessionDone(true);
       } else {
         setIdx(i => i + 1);
@@ -1531,8 +1783,11 @@ export default function VocabMasterPro({
       }
     };
 
+    console.log('🔍 ReviewScreen state:', { started, sessionDone, wordsLength: words?.length });
+
     // Empty state - no words available
     if (words.length === 0) {
+      console.log('📭 ReviewScreen: No words');
       return (
         <div style={{ padding: "40px 16px 100px", maxWidth: 480, margin: "0 auto", textAlign: "center", animation: "vmFadeIn 0.4s ease" }}>
           <button className="vm-btn" onClick={() => setScreen("home")} style={{ position: "absolute", top: 20, left: 16, background: "none", color: THEME.textSecondary, fontSize: 22, padding: 4 }}>←</button>
@@ -1551,30 +1806,62 @@ export default function VocabMasterPro({
       );
     }
 
-    if (!started) return (
-      <div style={{ padding: "20px 16px 100px", maxWidth: 480, margin: "0 auto", animation: "vmFadeIn 0.4s ease" }}>
-        <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 28 }}>
-          <button className="vm-btn" onClick={() => setScreen("home")} style={{ background: "none", color: THEME.textSecondary, fontSize: 22, padding: 4 }}>←</button>
-          <div style={{ fontSize: 22, fontWeight: 800 }}>Flashcard Review</div>
-        </div>
-        
-        <div className="vm-card" style={{ padding: 24, textAlign: "center", marginBottom: 20 }}>
-          <div style={{ fontSize: 48, marginBottom: 12 }}>🔄</div>
-          <div style={{ fontSize: 20, fontWeight: 700, marginBottom: 8 }}>Spaced Repetition Review</div>
-          <div style={{ fontSize: 14, color: THEME.textSecondary, marginBottom: 20 }}>
-            Review flashcards with the SM-2 algorithm. Cards you struggle with will appear more often.
+    if (!started) {
+      console.log('🎬 ReviewScreen: Pre-start screen');
+      // Calculate available words for review
+      const availableWords = focusMode
+        ? (words || []).filter(w => {
+            const totalReviews = w.srs?.totalReviews || 0;
+            const wrongReviews = w.srs?.wrongReviews || 0;
+            if (totalReviews < 2) return false;
+            const failureRate = wrongReviews / totalReviews;
+            return failureRate > 0.25;
+          })
+        : selectWordsForReview(words || [], dueWords || [], 1000);
+
+      const totalAvailable = availableWords?.length || 0;
+      const totalBatches = batchSize > 0 ? Math.ceil(totalAvailable / batchSize) : 0;
+
+      return (
+        <div style={{ padding: "20px 16px 100px", maxWidth: 480, margin: "0 auto", animation: "vmFadeIn 0.4s ease" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 28 }}>
+            <button className="vm-btn" onClick={() => setScreen("home")} style={{ background: "none", color: THEME.textSecondary, fontSize: 22, padding: 4 }}>←</button>
+            <div style={{ fontSize: 22, fontWeight: 800 }}>Flashcard Review</div>
           </div>
-          <div style={{ display: "flex", gap: 16, justifyContent: "center", marginBottom: 20 }}>
-            <div>
-              <div style={{ fontSize: 28, fontWeight: 800, color: THEME.danger }}>{dueWords.length}</div>
-              <div style={{ fontSize: 11, color: THEME.textMuted }}>Due now</div>
+
+          <div className="vm-card" style={{ padding: 24, textAlign: "center", marginBottom: 20 }}>
+            <div style={{ fontSize: 48, marginBottom: 12 }}>🔄</div>
+            <div style={{ fontSize: 20, fontWeight: 700, marginBottom: 8 }}>Spaced Repetition Review</div>
+            <div style={{ fontSize: 14, color: THEME.textSecondary, marginBottom: 20 }}>
+              Review flashcards with the SM-2 algorithm. Cards you struggle with will appear more often.
             </div>
-            <div style={{ width: 1, background: THEME.border }} />
-            <div>
-              <div style={{ fontSize: 28, fontWeight: 800, color: THEME.accent }}>{words.length}</div>
-              <div style={{ fontSize: 11, color: THEME.textMuted }}>Total words</div>
+
+            {/* Word count display */}
+            <div className="vm-card" style={{ padding: 16, marginBottom: 20, background: `${THEME.accent}08` }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 12, justifyContent: "center" }}>
+                <div style={{ fontSize: 36 }}>📚</div>
+                <div>
+                  <div style={{ fontSize: 24, fontWeight: 800, color: THEME.accent }}>{totalAvailable}</div>
+                  <div style={{ fontSize: 13, color: THEME.textSecondary }}>
+                    {totalAvailable === 0 ? "No words to review" :
+                     totalAvailable <= batchSize ? "words ready" :
+                     `words (${totalBatches} batches of ${batchSize})`}
+                  </div>
+                </div>
+              </div>
             </div>
-          </div>
+
+            <div style={{ display: "flex", gap: 16, justifyContent: "center", marginBottom: 20 }}>
+              <div>
+                <div style={{ fontSize: 28, fontWeight: 800, color: THEME.danger }}>{dueWords.length}</div>
+                <div style={{ fontSize: 11, color: THEME.textMuted }}>Due now</div>
+              </div>
+              <div style={{ width: 1, background: THEME.border }} />
+              <div>
+                <div style={{ fontSize: 28, fontWeight: 800, color: THEME.accent }}>{words.length}</div>
+                <div style={{ fontSize: 11, color: THEME.textMuted }}>Total words</div>
+              </div>
+            </div>
 
           {/* Focus Mode Toggle */}
           <div style={{ marginBottom: 20 }}>
@@ -1600,27 +1887,119 @@ export default function VocabMasterPro({
           }}>Start Review</button>
         </div>
       </div>
-    );
+      );
+    }
 
     if (sessionDone) {
+      console.log('✅ ReviewScreen: Session done');
       const total = sessionStats.correct + sessionStats.incorrect;
       const accuracy = total > 0 ? Math.round((sessionStats.correct / total) * 100) : 0;
+
+      // Check if there are more batches
+      const totalBatches = Math.ceil(allAvailableWords.length / batchSize);
+      const currentBatchNum = currentBatchIndex + 1;
+      const hasMoreBatches = (currentBatchIndex + 1) * batchSize < allAvailableWords.length;
+
       return (
         <div style={{ padding: "40px 16px 100px", maxWidth: 480, margin: "0 auto", textAlign: "center", animation: "vmBounceIn 0.5s ease" }}>
           <div style={{ fontSize: 64, marginBottom: 16 }}>🎯</div>
-          <div style={{ fontSize: 28, fontWeight: 800, marginBottom: 8 }}>Review Complete!</div>
-          <div style={{ fontSize: 32, fontWeight: 800, color: accuracy >= 70 ? THEME.success : THEME.warning, marginBottom: 24 }}>{accuracy}% accuracy</div>
+          <div style={{ fontSize: 28, fontWeight: 800, marginBottom: 8 }}>Batch Complete!</div>
+          <div style={{ fontSize: 15, color: THEME.textSecondary, marginBottom: 8 }}>
+            {accuracy >= 70 ? "Great job!" : "Keep practicing!"}
+          </div>
+
+          {/* Batch progress */}
+          {allAvailableWords.length > batchSize && (
+            <div style={{ fontSize: 13, color: THEME.textSecondary, marginBottom: 24 }}>
+              Batch {currentBatchNum} of {totalBatches} completed
+            </div>
+          )}
+
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12, marginBottom: 24 }}>
+            <div className="vm-card" style={{ padding: 16 }}>
+              <div style={{ fontSize: 28, fontWeight: 800, color: THEME.accent }}>{total}</div>
+              <div style={{ fontSize: 11, color: THEME.textMuted }}>Words</div>
+            </div>
+            <div className="vm-card" style={{ padding: 16 }}>
+              <div style={{ fontSize: 28, fontWeight: 800, color: THEME.success }}>{accuracy}%</div>
+              <div style={{ fontSize: 11, color: THEME.textMuted }}>Accuracy</div>
+            </div>
+            <div className="vm-card" style={{ padding: 16 }}>
+              <div style={{ fontSize: 28, fontWeight: 800, color: THEME.warning }}>+{total * 10}</div>
+              <div style={{ fontSize: 11, color: THEME.textMuted }}>XP</div>
+            </div>
+          </div>
+
+          {/* Reviewed Words List */}
+          {sessionHistory.length > 0 && (
+            <div className="vm-card" style={{ padding: 16, marginBottom: 24, textAlign: "left", maxHeight: 300, overflowY: "auto" }}>
+              <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 12, textAlign: "center", color: THEME.text }}>
+                📝 Words Reviewed
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {sessionHistory.map((item, i) => (
+                  <div key={i} style={{
+                    display: "flex", alignItems: "center", gap: 12, padding: "8px 12px",
+                    background: item.isGood ? `${THEME.success}08` : `${THEME.warning}08`,
+                    borderRadius: 8, border: `1px solid ${item.isGood ? `${THEME.success}20` : `${THEME.warning}20`}`,
+                  }}>
+                    <div style={{ fontSize: 18 }}>{item.isGood ? "✓" : "✗"}</div>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: 15, fontWeight: 600, color: THEME.text }}>{item.word.term}</div>
+                      <div style={{ fontSize: 12, color: THEME.textSecondary }}>{item.word.definition}</div>
+                    </div>
+                    <div style={{
+                      fontSize: 10, fontWeight: 700, padding: "4px 8px", borderRadius: 6,
+                      background: item.rating === "easy" ? `${THEME.success}20` :
+                                 item.rating === "good" ? `${THEME.info}20` :
+                                 item.rating === "hard" ? `${THEME.warning}20` :
+                                 `${THEME.danger}20`,
+                      color: item.rating === "easy" ? THEME.success :
+                            item.rating === "good" ? THEME.info :
+                            item.rating === "hard" ? THEME.warning :
+                            THEME.danger,
+                    }}>
+                      {item.rating.toUpperCase()}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           <div style={{ display: "flex", gap: 12 }}>
-            <button className="vm-btn" onClick={startReview} style={{ flex: 1, padding: 16, borderRadius: 14, background: THEME.gradient2, color: "#fff", fontSize: 15 }}>Review Again</button>
-            <button className="vm-btn" onClick={() => setScreen("home")} style={{ flex: 1, padding: 16, borderRadius: 14, background: THEME.card, color: THEME.text, fontSize: 15, border: `1px solid ${THEME.border}` }}>Home</button>
+            {hasMoreBatches ? (
+              <>
+                <button className="vm-btn" onClick={continueNextBatch} style={{
+                  flex: 1, padding: 16, borderRadius: 14, background: THEME.gradient2, color: "#fff", fontSize: 15,
+                }}>
+                  Continue Next Batch →
+                </button>
+                <button className="vm-btn" onClick={() => { setStarted(false); setScreen("home"); }} style={{
+                  flex: 1, padding: 16, borderRadius: 14, background: THEME.card, color: THEME.text, fontSize: 15, border: `1px solid ${THEME.border}`,
+                }}>
+                  Finish
+                </button>
+              </>
+            ) : (
+              <button className="vm-btn" onClick={() => { setStarted(false); setScreen("home"); }} style={{
+                width: "100%", padding: 16, borderRadius: 14, background: THEME.gradient2, color: "#fff", fontSize: 15,
+              }}>
+                Finish
+              </button>
+            )}
           </div>
         </div>
       );
     }
 
     const currentWord = queue[idx];
-    if (!currentWord) return null;
+    if (!currentWord) {
+      console.log('⚠️ ReviewScreen: No currentWord, returning null. started:', started, 'queue:', queue.length);
+      return null;
+    }
 
+    console.log('📝 ReviewScreen: Showing active review');
     return (
       <div style={{ padding: "20px 16px 100px", maxWidth: 480, margin: "0 auto" }}>
         <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 20 }}>

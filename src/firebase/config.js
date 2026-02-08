@@ -3,15 +3,15 @@ import { initializeApp } from 'firebase/app';
 import { getFirestore } from 'firebase/firestore';
 import { getAuth, GoogleAuthProvider } from 'firebase/auth';
 
-// TODO: Replace this with your Firebase config from Firebase Console
-// Settings → Project settings → Your apps → Web app
+// Firebase config loaded from environment variables
+// See .env.example for required variables
 const firebaseConfig = {
-  apiKey: "AIzaSyBxT7DPFMD6q-cTYMgk_RPBTEVy0NYcBTo",
-  authDomain: "vocab-master-pro-2b556.firebaseapp.com",
-  projectId: "vocab-master-pro-2b556",
-  storageBucket: "vocab-master-pro-2b556.firebasestorage.app",
-  messagingSenderId: "199508173635",
-  appId: "1:199508173635:web:82f9b1431c5a9e78cac5f6"
+  apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
+  authDomain: import.meta.env.VITE_FIREBASE_AUTH_DOMAIN,
+  projectId: import.meta.env.VITE_FIREBASE_PROJECT_ID,
+  storageBucket: import.meta.env.VITE_FIREBASE_STORAGE_BUCKET,
+  messagingSenderId: import.meta.env.VITE_FIREBASE_MESSAGING_SENDER_ID,
+  appId: import.meta.env.VITE_FIREBASE_APP_ID
 };
 
 // Initialize Firebase
