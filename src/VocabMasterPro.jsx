@@ -3726,7 +3726,7 @@ export default function VocabMasterPro({
 
     const generateQuiz = (type) => {
       setQuizType(type);
-      const pool = shuffleArray(words);
+      const pool = shuffleArray(filteredWords);
       const qs = [];
       const count = Math.min(10, pool.length);
 
@@ -3931,7 +3931,43 @@ export default function VocabMasterPro({
           <button className="vm-btn" onClick={() => setScreen("home")} style={{ background: "none", color: THEME.textSecondary, fontSize: 22, padding: 4 }}>←</button>
           <div style={{ fontSize: 22, fontWeight: 800 }}>Quiz Mode</div>
         </div>
-        
+
+        {/* Lesson Selector */}
+        <div className="vm-card" style={{ padding: 16, marginBottom: 16 }}>
+          <div style={{ fontSize: 13, fontWeight: 700, color: THEME.textMuted, marginBottom: 10 }}>📚 SELECT LESSON</div>
+          <select
+            className="vm-btn"
+            value={selectedLesson || ""}
+            onChange={(e) => setSelectedLesson(e.target.value || null)}
+            style={{
+              width: "100%",
+              padding: "12px 16px",
+              fontSize: 14,
+              fontWeight: 600,
+              borderRadius: 12,
+              background: THEME.card,
+              border: `1px solid ${THEME.border}`,
+              color: THEME.text,
+              cursor: "pointer",
+            }}
+          >
+            <option value="">All Lessons ({filteredWords.length} words)</option>
+            {TOEIC_LESSONS.map(lesson => {
+              const lessonWordCount = words.filter(w => w.lesson === lesson.id).length;
+              return (
+                <option key={lesson.id} value={lesson.id}>
+                  {lesson.title} ({lessonWordCount} words)
+                </option>
+              );
+            })}
+          </select>
+          {selectedLesson && (
+            <div style={{ marginTop: 8, fontSize: 12, color: THEME.textSecondary }}>
+              {TOEIC_LESSONS.find(l => l.id === selectedLesson)?.description}
+            </div>
+          )}
+        </div>
+
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
           {[
             { id: "mc", icon: "🔤", name: "Multiple Choice", desc: "Pick the right definition", color: THEME.accent },
