@@ -182,6 +182,73 @@ export const subscribeToStats = (userId, callback) => {
 };
 
 // ────────────────────────────────────────────────────────────
+// VIETMIX ARTICLES CRUD
+// ────────────────────────────────────────────────────────────
+
+/**
+ * Save/Update a VietMix article
+ */
+export const saveVietMixArticle = async (userId, article) => {
+  try {
+    const articleRef = doc(db, 'users', userId, 'vietmixArticles', article.id);
+    await setDoc(articleRef, {
+      ...article,
+      updatedAt: serverTimestamp()
+    }, { merge: true });
+    return { success: true };
+  } catch (error) {
+    console.error('Error saving VietMix article:', error);
+    return { success: false, error };
+  }
+};
+
+/**
+ * Delete a VietMix article
+ */
+export const deleteVietMixArticle = async (userId, articleId) => {
+  try {
+    await deleteDoc(doc(db, 'users', userId, 'vietmixArticles', articleId));
+    return { success: true };
+  } catch (error) {
+    console.error('Error deleting VietMix article:', error);
+    return { success: false, error };
+  }
+};
+
+/**
+ * Subscribe to VietMix articles (realtime)
+ */
+export const subscribeToVietMixArticles = (userId, callback) => {
+  const articlesRef = collection(db, 'users', userId, 'vietmixArticles');
+
+  return onSnapshot(articlesRef, (snapshot) => {
+    const articles = snapshot.docs.map(docSnapshot => ({
+      id: docSnapshot.id,
+      ...docSnapshot.data()
+    }));
+
+    // Keep newest first based on createdAt when available
+    const toMillis = (value) => {
+      if (!value) return 0;
+      if (typeof value === 'string') return new Date(value).getTime() || 0;
+      if (value?.toDate) return value.toDate().getTime() || 0;
+      return 0;
+    };
+
+    articles.sort((a, b) => {
+      const dateA = toMillis(a.createdAt);
+      const dateB = toMillis(b.createdAt);
+      return dateB - dateA;
+    });
+
+    callback(articles);
+  }, (error) => {
+    console.error('Error subscribing to VietMix articles:', error);
+    callback([]);
+  });
+};
+
+// ────────────────────────────────────────────────────────────
 // TOEIC VOCABULARY IMPORT
 // ────────────────────────────────────────────────────────────
 
@@ -243,6 +310,7 @@ export const migrateLocalStorageToFirestore = async (userId) => {
     // Get data from localStorage
     const localWords = JSON.parse(localStorage.getItem('vm_words') || '[]');
     const localStats = JSON.parse(localStorage.getItem('vm_stats') || '{}');
+    const localVietMixArticles = JSON.parse(localStorage.getItem('vm_vietmix_articles') || '[]');
 
     if (localWords.length > 0) {
       console.log(`Migrating ${localWords.length} words to Firestore...`);
@@ -254,7 +322,19 @@ export const migrateLocalStorageToFirestore = async (userId) => {
       await saveStats(userId, localStats);
     }
 
-    return { success: true, migratedWords: localWords.length };
+    if (Array.isArray(localVietMixArticles) && localVietMixArticles.length > 0) {
+      console.log(`Migrating ${localVietMixArticles.length} VietMix articles to Firestore...`);
+      const savePromises = localVietMixArticles
+        .filter(article => article?.id)
+        .map(article => saveVietMixArticle(userId, article));
+      await Promise.all(savePromises);
+    }
+
+    return {
+      success: true,
+      migratedWords: localWords.length,
+      migratedVietMixArticles: Array.isArray(localVietMixArticles) ? localVietMixArticles.length : 0
+    };
   } catch (error) {
     console.error('Migration error:', error);
     return { success: false, error };
@@ -280,8 +360,17 @@ export const deleteAllUserData = async (userId) => {
     const statsRef = doc(db, 'users', userId, 'data', 'stats');
     await deleteDoc(statsRef);
 
-    console.log(`✅ Deleted ${snapshot.docs.length} words and stats`);
-    return { success: true, deletedCount: snapshot.docs.length };
+    // Delete VietMix articles
+    const articlesRef = collection(db, 'users', userId, 'vietmixArticles');
+    const articlesSnapshot = await getDocs(articlesRef);
+    const deleteArticlePromises = articlesSnapshot.docs.map(docSnapshot => deleteDoc(docSnapshot.ref));
+    await Promise.all(deleteArticlePromises);
+
+    console.log(`✅ Deleted ${snapshot.docs.length} words, stats, and ${articlesSnapshot.docs.length} VietMix articles`);
+    return {
+      success: true,
+      deletedCount: snapshot.docs.length + articlesSnapshot.docs.length
+    };
   } catch (error) {
     console.error('Error deleting user data:', error);
     return { success: false, error };

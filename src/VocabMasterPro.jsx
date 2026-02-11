@@ -194,32 +194,83 @@ const shuffleArray = (arr) => {
   return a;
 };
 
-// Smart word selection: prioritize due words, then least reviewed
-const selectWordsForReview = (allWords, dueWords, limit) => {
-  if (dueWords.length >= limit) {
-    // Enough due words - just shuffle and take
-    return shuffleArray(dueWords).slice(0, limit);
+const getFailureRate = (word) => {
+  const totalReviews = word.srs?.totalReviews || 0;
+  const wrongReviews = word.srs?.wrongReviews || 0;
+  return totalReviews > 0 ? wrongReviews / totalReviews : 0;
+};
+
+const isWeakWord = (word) => {
+  const totalReviews = word.srs?.totalReviews || 0;
+  if (totalReviews < 3) return false;
+  return getFailureRate(word) >= 0.3;
+};
+
+const getReviewPriority = (word, isDue = false) => {
+  const reps = word.srs?.repetitions || 0;
+  const interval = word.srs?.interval || 0;
+  const failureRate = getFailureRate(word);
+
+  let overdueDays = 0;
+  if (word.srs?.nextReview) {
+    const diffMs = Date.now() - new Date(word.srs.nextReview).getTime();
+    overdueDays = Math.max(0, Math.floor(diffMs / (1000 * 60 * 60 * 24)));
   }
 
-  // Not enough due words - add least reviewed words
-  const selected = [...dueWords];
+  return (
+    (isDue ? 1000 : 0) +
+    failureRate * 250 +
+    Math.max(0, 5 - reps) * 12 +
+    Math.max(0, 2 - interval) * 8 +
+    overdueDays * 2
+  );
+};
+
+const interleaveByLesson = (words, limit) => {
+  const buckets = new Map();
+  words.forEach((word) => {
+    const key = word.lesson || "general";
+    if (!buckets.has(key)) buckets.set(key, []);
+    buckets.get(key).push(word);
+  });
+
+  const groups = [...buckets.values()];
+  const result = [];
+
+  while (result.length < limit && groups.some((group) => group.length > 0)) {
+    groups.forEach((group) => {
+      if (group.length > 0 && result.length < limit) {
+        result.push(group.shift());
+      }
+    });
+  }
+
+  return result;
+};
+
+// Smart word selection: prioritize due + weak words, then interleave lessons
+const selectWordsForReview = (allWords, dueWords, limit) => {
+  const dueIds = new Set(dueWords.map((w) => w.id));
+
+  const prioritizedDue = [...dueWords]
+    .sort((a, b) => getReviewPriority(b, true) - getReviewPriority(a, true));
+
+  if (prioritizedDue.length >= limit) {
+    return interleaveByLesson(prioritizedDue, limit);
+  }
+
+  const selected = interleaveByLesson(prioritizedDue, prioritizedDue.length);
   const remaining = limit - selected.length;
 
   if (remaining > 0) {
-    // Filter out due words and mastered words, then sort by least reviewed
     const notDue = allWords
-      .filter(w => !dueWords.includes(w) && !w.srs?.mastered)
-      .sort((a, b) => {
-        const aReps = a.srs?.repetitions || 0;
-        const bReps = b.srs?.repetitions || 0;
-        if (aReps !== bReps) return aReps - bReps; // Fewer reps first
-        return (a.srs?.totalReviews || 0) - (b.srs?.totalReviews || 0); // Fewer reviews first
-      });
+      .filter((w) => !dueIds.has(w.id) && !w.srs?.mastered)
+      .sort((a, b) => getReviewPriority(b, false) - getReviewPriority(a, false));
 
-    selected.push(...notDue.slice(0, remaining));
+    selected.push(...interleaveByLesson(notDue, remaining));
   }
 
-  return shuffleArray(selected);
+  return selected;
 };
 
 const speak = (text, rate = 0.85) => {
@@ -244,6 +295,44 @@ const formatDate = (iso) => {
   if (diff === 1) return "Tomorrow";
   if (diff < 0) return "Overdue";
   return `In ${diff} days`;
+};
+
+const VIETMIX_ARTICLES_KEY = "vm_vietmix_articles";
+const getVietMixArticlesStorageKey = (userId) => (userId ? `${VIETMIX_ARTICLES_KEY}_${userId}` : VIETMIX_ARTICLES_KEY);
+
+const normalizeTerm = (value) => `${value || ""}`.toLowerCase().replace(/\s+/g, " ").trim();
+
+const getMeaningGloss = (word) => {
+  const raw = `${word?.definition || ""}`.replace(/\s+/g, " ").trim();
+  if (!raw) return "chua co nghia";
+
+  const firstChunk = raw.split(/[;,]/)[0].trim();
+  const gloss = firstChunk || raw;
+  return gloss.length > 46 ? `${gloss.slice(0, 46)}...` : gloss;
+};
+
+const buildVietMixPassageFromWords = (words, title = "TOEIC Mixed Reading") => {
+  const sequence = (words || []).filter(Boolean).slice(0, 5);
+  if (sequence.length === 0) return null;
+  while (sequence.length < 5) sequence.push(sequence[0]);
+
+  const [w1, w2, w3, w4, w5] = sequence;
+  const token = (w) => `${w.term} (${getMeaningGloss(w)})`;
+
+  const lines = [
+    `Sang nay toi vao van phong va thay tu ${token(w1)} xuat hien ngay tren email dau tien.`,
+    `Trong buoi hop, quan ly nhac ca nhom can ${token(w2)} de xu ly cong viec dung ke hoach.`,
+    `Khi lam bao cao, toi co gang ${token(w3)} va luon kiem tra ky tung chi tiet.`,
+    `Den chieu, toi ghi chu them ${token(w4)} de nho tu vung TOEIC nhanh hon.`,
+    `Truoc khi ket thuc ngay, toi on lai ${token(w5)} va dat muc tieu dung dung trong giao tiep.`,
+  ];
+
+  return {
+    title: title || "TOEIC Mixed Reading",
+    lines,
+    focusWords: [w1, w2, w3, w4, w5],
+    source: "auto",
+  };
 };
 
 // ── CSS STYLES (injected) ─────────────────────────────────────
@@ -621,6 +710,7 @@ export default function VocabMasterPro({
 
   const [screen, setScreen] = useState("home");
   const [selectedLesson, setSelectedLesson] = useState(null); // null = all lessons
+  const [reviewFocusModePref, setReviewFocusModePref] = useState(false);
 
   const [stats, setStats] = useState(() => {
     // If using Firestore, start with empty stats (will load from Firestore)
@@ -854,6 +944,61 @@ export default function VocabMasterPro({
   }, [words, selectedLesson]);
 
   const dueWords = useMemo(() => filteredWords.filter(w => SRSEngine.isDueForReview(w)), [filteredWords]);
+  const allDueWords = useMemo(() => words.filter(w => SRSEngine.isDueForReview(w)), [words]);
+  const weakWords = useMemo(() => words.filter((w) => isWeakWord(w)), [words]);
+  const lessonInsights = useMemo(() => {
+    return TOEIC_LESSONS.map((lesson) => {
+      const lessonWords = words.filter((w) => w.lesson === lesson.id);
+      const total = lessonWords.length;
+      if (total === 0) {
+        return {
+          id: lesson.id,
+          title: lesson.title,
+          total: 0,
+          due: 0,
+          weak: 0,
+          mastered: 0,
+          progress: 0,
+          priority: 0,
+        };
+      }
+
+      const due = lessonWords.filter((w) => SRSEngine.isDueForReview(w)).length;
+      const weak = lessonWords.filter((w) => isWeakWord(w)).length;
+      const mastered = lessonWords.filter((w) => w.srs?.mastered).length;
+      const progress = mastered / total;
+
+      return {
+        id: lesson.id,
+        title: lesson.title,
+        total,
+        due,
+        weak,
+        mastered,
+        progress,
+        priority: due * 3 + weak * 4 + (1 - progress) * 2,
+      };
+    })
+      .filter((lesson) => lesson.total > 0)
+      .sort((a, b) => b.priority - a.priority || a.progress - b.progress);
+  }, [words]);
+  const recommendedLesson = lessonInsights[0] || null;
+  const todayPlan = useMemo(() => {
+    const dailyGoal = stats.dailyGoal || 20;
+    const dueCount = allDueWords.length;
+    const weakCount = weakWords.length;
+    const catchupBoost = Math.min(15, dueCount);
+    const weakBoost = Math.min(10, weakCount);
+    const suggestedReviews = Math.max(dailyGoal, catchupBoost + weakBoost);
+
+    return {
+      dueCount,
+      weakCount,
+      suggestedReviews,
+      recommendedLessonTitle: recommendedLesson?.title || "No recommendation",
+      recommendedLessonId: recommendedLesson?.id || null,
+    };
+  }, [stats.dailyGoal, allDueWords.length, weakWords.length, recommendedLesson]);
   const masteryDist = useMemo(() => {
     const dist = [0, 0, 0, 0, 0];
     words.forEach(w => dist[SRSEngine.getMasteryLevel(w)]++);
@@ -911,6 +1056,64 @@ export default function VocabMasterPro({
           </div>
         </div>
       </div>
+
+      {/* TOEIC Smart Plan */}
+      <div className="vm-card" style={{ padding: 20, marginBottom: 20 }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+          <div style={{ fontSize: 14, fontWeight: 700 }}>TOEIC Smart Plan</div>
+          <div style={{ fontSize: 11, color: THEME.textSecondary }}>Adaptive daily target</div>
+        </div>
+
+        <div style={{ fontSize: 13, color: THEME.textSecondary, marginBottom: 12 }}>
+          Recommended lesson: <strong style={{ color: THEME.text }}>{todayPlan.recommendedLessonTitle}</strong>
+        </div>
+
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, marginBottom: 14 }}>
+          <div style={{ padding: 10, borderRadius: 10, background: `${THEME.danger}10`, border: `1px solid ${THEME.danger}25` }}>
+            <div style={{ fontSize: 18, fontWeight: 800, color: THEME.danger }}>{todayPlan.dueCount}</div>
+            <div style={{ fontSize: 10, color: THEME.textMuted }}>Due today</div>
+          </div>
+          <div style={{ padding: 10, borderRadius: 10, background: `${THEME.warning}12`, border: `1px solid ${THEME.warning}25` }}>
+            <div style={{ fontSize: 18, fontWeight: 800, color: THEME.warning }}>{todayPlan.weakCount}</div>
+            <div style={{ fontSize: 10, color: THEME.textMuted }}>Weak words</div>
+          </div>
+          <div style={{ padding: 10, borderRadius: 10, background: `${THEME.accent}10`, border: `1px solid ${THEME.accent}25` }}>
+            <div style={{ fontSize: 18, fontWeight: 800, color: THEME.accent }}>{todayPlan.suggestedReviews}</div>
+            <div style={{ fontSize: 10, color: THEME.textMuted }}>Target reviews</div>
+          </div>
+        </div>
+
+        <div style={{ display: "flex", gap: 8 }}>
+          <button
+            className="vm-btn"
+            onClick={() => {
+              if (todayPlan.recommendedLessonId) {
+                setSelectedLesson(todayPlan.recommendedLessonId);
+              }
+              setScreen("learn");
+            }}
+            style={{
+              flex: 1, padding: "10px 12px", borderRadius: 10, fontSize: 12, fontWeight: 700,
+              background: `${THEME.accent}20`, color: THEME.accent, border: `1px solid ${THEME.accent}35`,
+            }}
+          >
+            Learn Suggested
+          </button>
+          <button
+            className="vm-btn"
+            onClick={() => {
+              setReviewFocusModePref(true);
+              setScreen("review");
+            }}
+            style={{
+              flex: 1, padding: "10px 12px", borderRadius: 10, fontSize: 12, fontWeight: 700,
+              background: `${THEME.warning}20`, color: THEME.warning, border: `1px solid ${THEME.warning}40`,
+            }}
+          >
+            Priority Review
+          </button>
+        </div>
+      </div>
       
       {/* Quick Actions */}
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 24 }}>
@@ -923,20 +1126,20 @@ export default function VocabMasterPro({
           <span style={{ fontSize: 12, opacity: 0.8 }}>Active Recall</span>
         </button>
         
-        <button className="vm-btn" onClick={() => setScreen("review")} style={{
+        <button className="vm-btn" onClick={() => { setReviewFocusModePref(false); setScreen("review"); }} style={{
           padding: 20, borderRadius: 16, background: THEME.gradient2, color: "#fff",
           display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 8,
           position: "relative",
         }}>
           <span style={{ fontSize: 28 }}>🔄</span>
           <span style={{ fontSize: 16, fontWeight: 700 }}>Review</span>
-          <span style={{ fontSize: 12, opacity: 0.8 }}>{dueWords.length} due</span>
-          {dueWords.length > 0 && (
+          <span style={{ fontSize: 12, opacity: 0.8 }}>{allDueWords.length} due</span>
+          {allDueWords.length > 0 && (
             <div style={{
               position: "absolute", top: 12, right: 12,
               background: "#fff", color: "#222", borderRadius: 20,
               padding: "2px 8px", fontSize: 12, fontWeight: 800,
-            }}>{dueWords.length}</div>
+            }}>{allDueWords.length}</div>
           )}
         </button>
         
@@ -1063,10 +1266,270 @@ export default function VocabMasterPro({
     const [shownHints, setShownHints] = useState([]);
     const [selectedMCOption, setSelectedMCOption] = useState(null);
     const [mcChoices, setMcChoices] = useState([]);
+    const [showVietMixEditor, setShowVietMixEditor] = useState(false);
+    const [editingVietMixArticleId, setEditingVietMixArticleId] = useState(null);
+    const [isSavingVietMixArticle, setIsSavingVietMixArticle] = useState(false);
+    const [vietMixDraft, setVietMixDraft] = useState({
+      title: "",
+      lessonId: "",
+      content: "",
+      focusTerms: "",
+    });
+    const [vietMixArticles, setVietMixArticles] = useState([]);
+    const [selectedVietMixArticleId, setSelectedVietMixArticleId] = useState("");
+    const [vietMixArticlesReady, setVietMixArticlesReady] = useState(false);
+    const vietMixStorageKey = useMemo(() => getVietMixArticlesStorageKey(userId), [userId]);
+
+    const normalizeVietMixArticle = useCallback((article, fallbackIndex = 0) => {
+      const createdAtRaw = article?.createdAt;
+      const createdAt = typeof createdAtRaw === "string"
+        ? createdAtRaw
+        : createdAtRaw?.toDate
+          ? createdAtRaw.toDate().toISOString()
+          : new Date(Date.now() - fallbackIndex).toISOString();
+
+      const updatedAtRaw = article?.updatedAt;
+      const updatedAt = typeof updatedAtRaw === "string"
+        ? updatedAtRaw
+        : updatedAtRaw?.toDate
+          ? updatedAtRaw.toDate().toISOString()
+          : createdAt;
+
+      return {
+        id: article?.id || `vm_article_${Date.now()}_${fallbackIndex}`,
+        title: `${article?.title || ""}`.trim() || `Bai viet ${fallbackIndex + 1}`,
+        lessonId: `${article?.lessonId || ""}`.trim(),
+        content: `${article?.content || ""}`.trim(),
+        focusTerms: Array.isArray(article?.focusTerms)
+          ? article.focusTerms.map((term) => `${term || ""}`.trim()).filter(Boolean)
+          : [],
+        createdAt,
+        updatedAt,
+      };
+    }, []);
+
+    const sortVietMixArticlesByDate = useCallback((articles) => {
+      return [...articles].sort((a, b) => {
+        const dateA = a?.createdAt ? new Date(a.createdAt).getTime() : 0;
+        const dateB = b?.createdAt ? new Date(b.createdAt).getTime() : 0;
+        return dateB - dateA;
+      });
+    }, []);
+
+    const upsertVietMixArticleState = useCallback((article) => {
+      setVietMixArticles((prev) => {
+        const exists = prev.some((item) => item.id === article.id);
+        const next = exists
+          ? prev.map((item) => (item.id === article.id ? article : item))
+          : [article, ...prev];
+        return sortVietMixArticlesByDate(next);
+      });
+    }, [sortVietMixArticlesByDate]);
+
+    useEffect(() => {
+      setVietMixArticlesReady(false);
+
+      if (firestoreService?.subscribeToVietMixArticles && userId) {
+        const unsubscribe = firestoreService.subscribeToVietMixArticles((articles = []) => {
+          const normalized = sortVietMixArticlesByDate(
+            (Array.isArray(articles) ? articles : []).map((article, index) => normalizeVietMixArticle(article, index))
+          );
+          setVietMixArticles(normalized);
+          setVietMixArticlesReady(true);
+        });
+        return () => {
+          if (typeof unsubscribe === "function") unsubscribe();
+        };
+      }
+
+      try {
+        const saved = localStorage?.getItem?.(vietMixStorageKey);
+        const legacySaved = localStorage?.getItem?.(VIETMIX_ARTICLES_KEY);
+        const parsed = saved ? JSON.parse(saved) : legacySaved ? JSON.parse(legacySaved) : [];
+        const normalized = sortVietMixArticlesByDate(
+          (Array.isArray(parsed) ? parsed : []).map((article, index) => normalizeVietMixArticle(article, index))
+        );
+        setVietMixArticles(normalized);
+      } catch {
+        setVietMixArticles([]);
+      } finally {
+        setVietMixArticlesReady(true);
+      }
+    }, [
+      firestoreService,
+      userId,
+      vietMixStorageKey,
+      normalizeVietMixArticle,
+      sortVietMixArticlesByDate,
+    ]);
+
+    useEffect(() => {
+      if (!vietMixArticlesReady) return;
+      if (firestoreService?.subscribeToVietMixArticles && userId) return;
+
+      try {
+        localStorage?.setItem?.(vietMixStorageKey, JSON.stringify(vietMixArticles));
+      } catch {}
+    }, [vietMixArticles, vietMixStorageKey, firestoreService, userId, vietMixArticlesReady]);
+
+    const resetVietMixEditor = useCallback(() => {
+      setEditingVietMixArticleId(null);
+      setVietMixDraft({
+        title: "",
+        lessonId: selectedLesson || "",
+        content: "",
+        focusTerms: "",
+      });
+      setShowVietMixEditor(false);
+    }, [selectedLesson]);
+    const notifyLearnScreen = useCallback((msg, type = "warning") => {
+      // Avoid parent-level toast updates while learning session is active,
+      // because they can reset nested LearnScreen local state.
+      if (mode === "vietmix") {
+        console.log(`[VietMix] ${msg}`);
+        return;
+      }
+      showToast(msg, type);
+    }, [mode, showToast]);
+
+    const handleSaveVietMixArticle = async () => {
+      if (isSavingVietMixArticle) return;
+      if (!vietMixDraft.content.trim()) {
+        notifyLearnScreen("Please add article content first", "warning");
+        return;
+      }
+
+      const now = new Date().toISOString();
+      const articleId = editingVietMixArticleId || `vm_article_${Date.now()}`;
+      const existedArticle = vietMixArticles.find((article) => article.id === articleId);
+      const article = {
+        id: articleId,
+        title: vietMixDraft.title.trim() || `Bai viet ${vietMixArticles.length + 1}`,
+        lessonId: vietMixDraft.lessonId || currentLessonIdForVietMix || selectedLesson || "",
+        content: vietMixDraft.content.trim(),
+        focusTerms: vietMixDraft.focusTerms
+          .split(",")
+          .map((term) => term.trim())
+          .filter(Boolean),
+        createdAt: existedArticle?.createdAt || now,
+        updatedAt: now,
+      };
+
+      try {
+        setIsSavingVietMixArticle(true);
+
+        if (firestoreService?.saveVietMixArticle && userId) {
+          const result = await firestoreService.saveVietMixArticle(article);
+          if (!result?.success) throw result?.error || new Error("Save article failed");
+        }
+
+        upsertVietMixArticleState(article);
+        setSelectedVietMixArticleId(article.id);
+        resetVietMixEditor();
+        notifyLearnScreen(editingVietMixArticleId ? "Updated VietMix article" : "Saved VietMix article", "success");
+      } catch (error) {
+        console.error("Failed to save VietMix article:", error);
+        const isPermissionError = `${error?.code || ""}`.includes("permission-denied");
+        notifyLearnScreen(
+          isPermissionError
+            ? "Firebase rules do not allow vietmixArticles yet"
+            : "Could not save article. Please try again.",
+          "warning"
+        );
+      } finally {
+        setIsSavingVietMixArticle(false);
+      }
+    };
+
+    const handleEditVietMixArticle = (article) => {
+      if (!article) return;
+      setEditingVietMixArticleId(article.id);
+      setVietMixDraft({
+        title: article.title || "",
+        lessonId: article.lessonId || selectedLesson || "",
+        content: article.content || "",
+        focusTerms: Array.isArray(article.focusTerms) ? article.focusTerms.join(", ") : "",
+      });
+      setShowVietMixEditor(true);
+    };
+
+    const handleDeleteVietMixArticle = async (articleId) => {
+      if (!articleId) return;
+
+      try {
+        if (firestoreService?.deleteVietMixArticle && userId) {
+          const result = await firestoreService.deleteVietMixArticle(articleId);
+          if (!result?.success) throw result?.error || new Error("Delete article failed");
+        }
+
+        setVietMixArticles((prev) => prev.filter((article) => article.id !== articleId));
+        if (selectedVietMixArticleId === articleId) {
+          setSelectedVietMixArticleId("");
+        }
+        if (editingVietMixArticleId === articleId) {
+          resetVietMixEditor();
+        }
+        notifyLearnScreen("Deleted article", "warning");
+      } catch (error) {
+        console.error("Failed to delete VietMix article:", error);
+        const isPermissionError = `${error?.code || ""}`.includes("permission-denied");
+        notifyLearnScreen(
+          isPermissionError
+            ? "Firebase rules do not allow vietmixArticles yet"
+            : "Could not delete article. Please try again.",
+          "warning"
+        );
+      }
+    };
+
+    const handleDeleteAllVietMixArticles = async () => {
+      if (vietMixArticles.length === 0) {
+        notifyLearnScreen("No articles to delete", "warning");
+        return;
+      }
+
+      const confirmed = window.confirm(`Delete all ${vietMixArticles.length} VietMix articles?`);
+      if (!confirmed) return;
+
+      try {
+        if (firestoreService?.deleteVietMixArticle && userId) {
+          const results = await Promise.all(
+            vietMixArticles.map((article) => firestoreService.deleteVietMixArticle(article.id))
+          );
+          const failed = results.some((result) => !result?.success);
+          if (failed) {
+            throw new Error("Delete all articles failed");
+          }
+        }
+
+        setVietMixArticles([]);
+        setSelectedVietMixArticleId("");
+        resetVietMixEditor();
+        try {
+          localStorage?.removeItem?.(vietMixStorageKey);
+          localStorage?.removeItem?.(VIETMIX_ARTICLES_KEY);
+        } catch {}
+        notifyLearnScreen("All VietMix articles deleted", "warning");
+      } catch (error) {
+        console.error("Failed to delete all VietMix articles:", error);
+        const isPermissionError = `${error?.code || ""}`.includes("permission-denied");
+        notifyLearnScreen(
+          isPermissionError
+            ? "Firebase rules do not allow vietmixArticles yet"
+            : "Failed to delete all articles. Try again.",
+          "warning"
+        );
+      }
+    };
 
     const startSession = (selectedMode, batchIndex = 0) => {
       // Pause Firestore updates during session to prevent re-renders
       isInLearningSession.current = true;
+      setShowVietMixEditor(false);
+      setEditingVietMixArticleId(null);
+      if (selectedMode === "vietmix" && batchIndex === 0) {
+        setSelectedVietMixArticleId("");
+      }
 
       // Reset accumulated data for fresh session (not for continue batch)
       if (batchIndex === 0) {
@@ -1087,7 +1550,7 @@ export default function VocabMasterPro({
 
       setQueue(batchWords);
       setIdx(0);
-      setPhase("think");
+      setPhase(selectedMode === "vietmix" ? "reveal" : "think");
       setSessionStats({ correct: 0, incorrect: 0 });
       setSessionHistory([]); // Reset session history for new batch
       sessionReviewsRef.current = []; // Reset session reviews
@@ -1135,6 +1598,75 @@ export default function VocabMasterPro({
 
     const currentWord = queue[idx];
     const progress = queue.length > 0 ? (idx / queue.length) : 0;
+    const currentPassageIndex = Math.floor(idx / 5);
+    const currentPassageStart = currentPassageIndex * 5;
+    const currentPassageWords = useMemo(
+      () => queue.slice(currentPassageStart, currentPassageStart + 5),
+      [queue, currentPassageStart]
+    );
+    const currentLessonIdForVietMix = selectedLesson || currentPassageWords[0]?.lesson || "";
+    const activeVietMixArticleId = selectedVietMixArticleId || vietMixArticles[0]?.id || "";
+
+    useEffect(() => {
+      if (!selectedVietMixArticleId) return;
+      const selectedStillExists = vietMixArticles.some((article) => article.id === selectedVietMixArticleId);
+      if (!selectedStillExists) {
+        setSelectedVietMixArticleId("");
+      }
+    }, [selectedVietMixArticleId, vietMixArticles]);
+
+    const vietMixPassage = useMemo(() => {
+      if (mode !== "vietmix" || currentPassageWords.length === 0) return null;
+
+      const wordMap = new Map(words.map((word) => [normalizeTerm(word.term), word]));
+      const selectedManual = selectedVietMixArticleId
+        ? vietMixArticles.find((article) => article.id === selectedVietMixArticleId)
+        : null;
+      const manualArticle = selectedManual || vietMixArticles[0] || null;
+
+      if (manualArticle) {
+        const requestedWords = (manualArticle.focusTerms || [])
+          .map((term) => wordMap.get(normalizeTerm(term)))
+          .filter(Boolean);
+
+        const focusWords = [];
+        const seen = new Set();
+        [...requestedWords, ...currentPassageWords].forEach((word) => {
+          if (!word || seen.has(word.id) || focusWords.length >= 5) return;
+          seen.add(word.id);
+          focusWords.push(word);
+        });
+
+        const lines = `${manualArticle.content || ""}`
+          .split("\n")
+          .map((line) => line.trim())
+          .filter(Boolean);
+
+        return {
+          title: manualArticle.title || currentPassageWords[0]?.lessonTitle || "VietMix Reading",
+          lines: lines.length > 0 ? lines : ["No content yet."],
+          focusWords: focusWords.length > 0 ? focusWords : currentPassageWords,
+          source: "manual",
+        };
+      }
+
+      return null;
+    }, [
+      mode,
+      currentPassageWords,
+      currentPassageIndex,
+      currentLessonIdForVietMix,
+      words,
+      selectedVietMixArticleId,
+      vietMixArticles,
+    ]);
+    const currentVietMixFocusWord = useMemo(() => {
+      if (mode !== "vietmix") return null;
+      const focusWords = vietMixPassage?.focusWords || [];
+      if (focusWords.length === 0) return null;
+      return focusWords[idx % focusWords.length] || focusWords[0];
+    }, [mode, vietMixPassage, idx]);
+    const activeSessionWord = mode === "vietmix" ? (currentVietMixFocusWord || currentWord) : currentWord;
 
     // Reset hints and flashcard flip when word changes
     useEffect(() => {
@@ -1147,7 +1679,7 @@ export default function VocabMasterPro({
     }, [idx]);
 
     const handleRate = (rating) => {
-      if (!currentWord) return;
+      if (!activeSessionWord) return;
 
       // For Type mode with hints, adjust quality based on hints used
       let adjustedRating = rating;
@@ -1164,7 +1696,7 @@ export default function VocabMasterPro({
       }
 
       // Save to Firestore only (no parent state updates to prevent re-render)
-      const { updated, quality: originalQuality } = updateWordSRSInSession(currentWord, adjustedRating);
+      const { updated, quality: originalQuality } = updateWordSRSInSession(activeSessionWord, adjustedRating);
       const finalQuality = adjustedQuality || originalQuality;
 
       // Track review for batch stats update at end (with hint-adjusted quality for Type mode)
@@ -1175,7 +1707,7 @@ export default function VocabMasterPro({
       });
 
       // Update the word in queue for immediate UI feedback
-      setQueue(prev => prev.map(w => w.id === currentWord.id ? updated : w));
+      setQueue(prev => prev.map(w => w.id === activeSessionWord.id ? updated : w));
 
       // Update session stats (local state, safe)
       const isGood = adjustedRating === "good" || adjustedRating === "easy";
@@ -1186,7 +1718,7 @@ export default function VocabMasterPro({
 
       // Track word in session history for review display
       setSessionHistory(prev => [...prev, {
-        word: currentWord,
+        word: activeSessionWord,
         rating: adjustedRating,
         isGood,
         hintsUsed: mode === "type" ? hintsUsed : 0,
@@ -1197,14 +1729,14 @@ export default function VocabMasterPro({
         pendingLearnUpdates.current.reviews.push(...sessionReviewsRef.current);
         pendingLearnUpdates.current.queueWords.push(...queue.map(w => {
           // Include current word's updated SRS from this batch
-          const qw = w.id === currentWord.id ? updated : w;
+          const qw = w.id === activeSessionWord.id ? updated : w;
           return qw;
         }));
         sessionReviewsRef.current = [];
 
         // Save to Firestore async (non-blocking, no parent state change)
         if (firestoreService && userId) {
-          const wordsToSave = queue.map(w => w.id === currentWord.id ? updated : w);
+          const wordsToSave = queue.map(w => w.id === activeSessionWord.id ? updated : w);
           setTimeout(async () => {
             try {
               await firestoreService.saveWords(wordsToSave);
@@ -1219,7 +1751,7 @@ export default function VocabMasterPro({
       } else {
         // Move to next word
         setIdx(i => i + 1);
-        setPhase("think");
+        setPhase(mode === "vietmix" ? "reveal" : "think");
         setTypedAnswer("");
         setIsCorrect(null);
       }
@@ -1438,7 +1970,7 @@ export default function VocabMasterPro({
                 cursor: "pointer",
               }}
             >
-              <option value="">All Lessons ({filteredWords.length} words)</option>
+              <option value="">All Lessons ({words.length} words)</option>
               {TOEIC_LESSONS.map(lesson => {
                 const lessonWordCount = words.filter(w => w.lesson === lesson.id).length;
                 return (
@@ -1451,6 +1983,39 @@ export default function VocabMasterPro({
             {selectedLesson && (
               <div style={{ marginTop: 8, fontSize: 12, color: THEME.textSecondary }}>
                 {TOEIC_LESSONS.find(l => l.id === selectedLesson)?.description}
+              </div>
+            )}
+            {recommendedLesson && (
+              <div style={{
+                marginTop: 12,
+                padding: 10,
+                borderRadius: 10,
+                background: `${THEME.warning}12`,
+                border: `1px solid ${THEME.warning}30`,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: 10,
+              }}>
+                <div style={{ fontSize: 11, color: THEME.textSecondary }}>
+                  Suggested now: <strong style={{ color: THEME.text }}>{recommendedLesson.title}</strong>
+                </div>
+                <button
+                  className="vm-btn"
+                  onClick={() => setSelectedLesson(recommendedLesson.id)}
+                  style={{
+                    padding: "6px 10px",
+                    borderRadius: 8,
+                    fontSize: 11,
+                    fontWeight: 700,
+                    background: `${THEME.warning}20`,
+                    color: THEME.warning,
+                    border: `1px solid ${THEME.warning}40`,
+                    flexShrink: 0,
+                  }}
+                >
+                  Use
+                </button>
               </div>
             )}
           </div>
@@ -1484,6 +2049,7 @@ export default function VocabMasterPro({
                 { id: "recall", icon: "🧠", name: "Active Recall", desc: "See word → Think → Reveal → Rate", color: THEME.accent },
                 { id: "sentence", icon: "📝", name: "Sentence Builder", desc: "Build sentences using vocabulary words", color: THEME.warning },
                 { id: "listen", icon: "👂", name: "Listening", desc: "Hear pronunciation → Recall meaning → Rate", color: THEME.info },
+                { id: "vietmix", icon: "📰", name: "VietMix Reading", desc: "Doc tieng Viet chen tu tieng Anh (kem nghia)", color: THEME.accentLight, new: true },
               ].map(m => (
           <button key={m.id} className="vm-btn vm-card" onClick={() => startSession(m.id)} style={{
             width: "100%", padding: 20, marginBottom: 12, textAlign: "left",
@@ -1941,6 +2507,297 @@ export default function VocabMasterPro({
       );
     }
 
+    // Vietnamese Reading + English Terms Mode
+    if (mode === "vietmix") return (
+      <div style={{ padding: "20px 16px 100px", maxWidth: 520, margin: "0 auto", animation: "vmFadeIn 0.3s ease" }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 20 }}>
+          <button className="vm-btn" onClick={exitSession} style={{ background: "none", color: THEME.textSecondary, fontSize: 22, padding: 4 }}>←</button>
+          <div style={{ fontSize: 13, fontWeight: 600, color: THEME.textSecondary }}>{idx + 1} / {queue.length}</div>
+          <div className="vm-mono" style={{ fontSize: 12, color: THEME.accent }}>VietMix Reading</div>
+        </div>
+
+        <div style={{ height: 4, borderRadius: 2, background: THEME.border, marginBottom: 24, overflow: "hidden" }}>
+          <div style={{ height: "100%", width: `${((idx + (phase === "reveal" ? 1 : 0.5)) / queue.length) * 100}%`, background: THEME.gradient1, transition: "width 0.4s ease", borderRadius: 2 }} />
+        </div>
+
+        <div className="vm-card" style={{ padding: 14, marginBottom: 12 }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 10 }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: THEME.textSecondary }}>
+              Article Library ({vietMixArticles.length})
+            </div>
+            <div style={{ display: "flex", gap: 6 }}>
+              <button
+                className="vm-btn"
+                onClick={handleDeleteAllVietMixArticles}
+                style={{
+                  padding: "6px 10px",
+                  borderRadius: 8,
+                  fontSize: 11,
+                  fontWeight: 700,
+                  background: `${THEME.danger}12`,
+                  color: THEME.danger,
+                  border: `1px solid ${THEME.danger}35`,
+                }}
+              >
+                Delete All
+              </button>
+              <button
+                className="vm-btn"
+                onClick={() => {
+                  if (showVietMixEditor && !editingVietMixArticleId) {
+                    resetVietMixEditor();
+                    return;
+                  }
+                  setEditingVietMixArticleId(null);
+                  setVietMixDraft({
+                    title: "",
+                    lessonId: selectedLesson || currentLessonIdForVietMix || "",
+                    content: "",
+                    focusTerms: "",
+                  });
+                  setShowVietMixEditor(true);
+                }}
+                style={{
+                  padding: "6px 10px",
+                  borderRadius: 8,
+                  fontSize: 11,
+                  fontWeight: 700,
+                  background: `${THEME.accent}18`,
+                  color: THEME.accent,
+                  border: `1px solid ${THEME.accent}35`,
+                }}
+              >
+                Add Article
+              </button>
+            </div>
+          </div>
+
+          {showVietMixEditor && (
+            <div className="vm-card" style={{ padding: 12, marginBottom: 10, background: `${THEME.accent}08` }}>
+              <input
+                className="vm-input"
+                value={vietMixDraft.title}
+                onChange={(e) => setVietMixDraft((prev) => ({ ...prev, title: e.target.value }))}
+                placeholder="Article title"
+                style={{ marginBottom: 8 }}
+              />
+              <select
+                className="vm-btn"
+                value={vietMixDraft.lessonId}
+                onChange={(e) => setVietMixDraft((prev) => ({ ...prev, lessonId: e.target.value }))}
+                style={{
+                  width: "100%",
+                  padding: "10px 12px",
+                  fontSize: 12,
+                  fontWeight: 600,
+                  borderRadius: 10,
+                  background: THEME.card,
+                  border: `1px solid ${THEME.border}`,
+                  color: THEME.text,
+                  cursor: "pointer",
+                  marginBottom: 8,
+                }}
+              >
+                <option value="">All lessons</option>
+                {TOEIC_LESSONS.map((lesson) => (
+                  <option key={lesson.id} value={lesson.id}>{lesson.title}</option>
+                ))}
+              </select>
+              <textarea
+                className="vm-input"
+                value={vietMixDraft.content}
+                onChange={(e) => setVietMixDraft((prev) => ({ ...prev, content: e.target.value }))}
+                placeholder="Write your Vietnamese passage with English words..."
+                style={{ minHeight: 110, resize: "vertical", lineHeight: 1.6, marginBottom: 8 }}
+              />
+              <input
+                className="vm-input"
+                value={vietMixDraft.focusTerms}
+                onChange={(e) => setVietMixDraft((prev) => ({ ...prev, focusTerms: e.target.value }))}
+                placeholder="focus words: deadline, agenda, memorandum"
+                style={{ marginBottom: 8 }}
+              />
+              <div style={{ display: "flex", gap: 8 }}>
+                <button
+                  className="vm-btn"
+                  onClick={handleSaveVietMixArticle}
+                  disabled={isSavingVietMixArticle}
+                  style={{
+                    flex: 1, padding: "8px 10px", borderRadius: 8, fontSize: 12, fontWeight: 700,
+                    background: THEME.gradient1, color: "#fff",
+                    opacity: isSavingVietMixArticle ? 0.75 : 1,
+                  }}
+                >
+                  {isSavingVietMixArticle ? "Saving..." : editingVietMixArticleId ? "Update" : "Save"}
+                </button>
+                <button
+                  className="vm-btn"
+                  onClick={resetVietMixEditor}
+                  style={{
+                    padding: "8px 10px", borderRadius: 8, fontSize: 12, fontWeight: 700,
+                    background: THEME.surface, color: THEME.textSecondary, border: `1px solid ${THEME.border}`,
+                  }}
+                >
+                  Close
+                </button>
+              </div>
+            </div>
+          )}
+
+          <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 160, overflowY: "auto" }}>
+            {!vietMixArticlesReady && (
+              <div style={{ fontSize: 11, color: THEME.textMuted }}>
+                Loading articles...
+              </div>
+            )}
+
+            {vietMixArticlesReady && (
+              <>
+                {vietMixArticles.map((article) => {
+                  const lessonLabel = article.lessonId
+                    ? TOEIC_LESSONS.find((lesson) => lesson.id === article.lessonId)?.title || article.lessonId
+                    : "All lessons";
+
+                  return (
+                    <div key={article.id} style={{ display: "flex", gap: 6 }}>
+                      <button
+                        className="vm-btn"
+                        onClick={() => {
+                          setSelectedVietMixArticleId(article.id);
+                          setPhase("reveal");
+                        }}
+                        style={{
+                          flex: 1,
+                          textAlign: "left",
+                          padding: "8px 10px",
+                          borderRadius: 8,
+                          fontSize: 12,
+                          fontWeight: 600,
+                          background: activeVietMixArticleId === article.id ? `${THEME.accent}18` : THEME.surface,
+                          color: activeVietMixArticleId === article.id ? THEME.accent : THEME.textSecondary,
+                          border: `1px solid ${activeVietMixArticleId === article.id ? `${THEME.accent}40` : THEME.border}`,
+                          overflow: "hidden",
+                        }}
+                      >
+                        <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {article.title}
+                        </div>
+                        <div style={{ fontSize: 10, opacity: 0.72, marginTop: 2 }}>
+                          {lessonLabel}
+                        </div>
+                      </button>
+                      <button
+                        className="vm-btn"
+                        onClick={() => handleEditVietMixArticle(article)}
+                        style={{
+                          padding: "8px 10px",
+                          borderRadius: 8,
+                          fontSize: 11,
+                          fontWeight: 700,
+                          background: `${THEME.info}12`,
+                          color: THEME.info,
+                          border: `1px solid ${THEME.info}35`,
+                          flexShrink: 0,
+                        }}
+                      >
+                        Edit
+                      </button>
+                      <button
+                        className="vm-btn"
+                        onClick={() => handleDeleteVietMixArticle(article.id)}
+                        style={{
+                          padding: "8px 10px",
+                          borderRadius: 8,
+                          fontSize: 11,
+                          fontWeight: 700,
+                          background: `${THEME.danger}12`,
+                          color: THEME.danger,
+                          border: `1px solid ${THEME.danger}35`,
+                          flexShrink: 0,
+                        }}
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  );
+                })}
+
+                {vietMixArticles.length === 0 && (
+                  <div style={{ fontSize: 11, color: THEME.textMuted }}>
+                    No articles yet. Add your first article to start.
+                  </div>
+                )}
+              </>
+            )}
+          </div>
+        </div>
+
+        <div className="vm-card" style={{ padding: 12, marginBottom: 12, background: `${THEME.info}08` }}>
+          <div style={{ fontSize: 12, color: THEME.textSecondary, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+            <span>
+              Focus word {(idx % Math.max(1, (vietMixPassage?.focusWords?.length || 1))) + 1}/{Math.min(5, vietMixPassage?.focusWords?.length || 0)}
+            </span>
+            <strong style={{ color: THEME.text }}>{activeSessionWord?.term || "-"}</strong>
+          </div>
+          <div style={{ fontSize: 11, color: THEME.textMuted, marginTop: 4 }}>
+            Source: {vietMixPassage?.source === "manual" ? `Manual - ${vietMixPassage?.title}` : "No article selected"}
+          </div>
+        </div>
+
+        <div className="vm-card" style={{ padding: 20, marginBottom: 16 }}>
+          <div style={{ fontSize: 11, fontWeight: 700, color: THEME.textMuted, textTransform: "uppercase", letterSpacing: 1, marginBottom: 8 }}>
+            TOEIC Reading (Lesson Theme)
+          </div>
+          <div style={{ fontSize: 14, color: THEME.textSecondary, marginBottom: 14 }}>
+            {vietMixPassage?.title || "Add an article to start reading"}
+          </div>
+
+          <div style={{ fontSize: 16, lineHeight: 1.8, color: THEME.text }}>
+            {(vietMixPassage?.lines || ["Use Add Article to create your first VietMix passage."]).map((line, lineIndex) => (
+              <div key={lineIndex} style={{ marginBottom: 8 }}>
+                {line}
+              </div>
+            ))}
+          </div>
+        </div>
+
+        <div className="vm-card" style={{ padding: 14, marginBottom: 20, background: `${THEME.accent}08` }}>
+          <div style={{ fontSize: 11, fontWeight: 700, color: THEME.accent, marginBottom: 8 }}>
+            Focus Words In This Passage
+          </div>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+            {(vietMixPassage?.focusWords || []).map((word, wordIndex) => (
+              <span key={`${word.id}_${wordIndex}`} className="vm-tag" style={{ background: `${THEME.accent}15`, color: THEME.accent }}>
+                {word.term}
+              </span>
+            ))}
+          </div>
+        </div>
+
+        {!vietMixPassage && (
+          <button
+            className="vm-btn"
+            onClick={() => setShowVietMixEditor(true)}
+            style={{
+              width: "100%", padding: 16, borderRadius: 14, background: THEME.gradient1,
+              color: "#fff", fontSize: 15, fontWeight: 700,
+            }}
+          >
+            Add Article First
+          </button>
+        )}
+
+        {vietMixPassage && (
+          <div style={{ animation: "vmSlideUp 0.3s ease" }}>
+            <div style={{ marginBottom: 16 }}>
+              <WordCard word={activeSessionWord || currentWord} showDef compact />
+            </div>
+            <RatingButtons onRate={handleRate} word={activeSessionWord || currentWord} />
+          </div>
+        )}
+      </div>
+    );
+
     // Active Recall Mode
     if (mode === "recall") return (
       <div style={{ padding: "20px 16px 100px", maxWidth: 480, margin: "0 auto", animation: "vmFadeIn 0.3s ease" }}>
@@ -2388,12 +3245,19 @@ export default function VocabMasterPro({
     const [sessionStats, setSessionStats] = useState({ correct: 0, incorrect: 0 });
     const [sessionResults, setSessionResults] = useState([]);
     const [sessionHistory, setSessionHistory] = useState([]);
-    const [focusMode, setFocusMode] = useState(false);
+    const [focusMode, setFocusMode] = useState(reviewFocusModePref);
 
     // Batch learning state
     const [allAvailableWords, setAllAvailableWords] = useState([]);
     const [batchSize] = useState(20);
     const [currentBatchIndex, setCurrentBatchIndex] = useState(0);
+
+    useEffect(() => {
+      if (reviewFocusModePref) {
+        setFocusMode(true);
+        setReviewFocusModePref(false);
+      }
+    }, [reviewFocusModePref]);
 
     const startReview = (batchIndex = 0) => {
       isInLearningSession.current = true;

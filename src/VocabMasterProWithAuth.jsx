@@ -9,6 +9,9 @@ import {
   saveWords,
   saveStats,
   deleteWord,
+  saveVietMixArticle,
+  deleteVietMixArticle,
+  subscribeToVietMixArticles,
   migrateLocalStorageToFirestore,
   deleteAllUserData,
   importTOEICWords
@@ -25,6 +28,7 @@ export default function VocabMasterProWithAuth() {
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
       setUser(currentUser);
+      setMigrated(false);
       setLoading(false);
 
       if (currentUser) {
@@ -47,8 +51,10 @@ export default function VocabMasterProWithAuth() {
       }
 
       const migrate = async () => {
-        const hasLocalData = localStorage.getItem('vm_words');
-        if (hasLocalData) {
+        const hasLocalWords = localStorage.getItem('vm_words');
+        const hasLocalStats = localStorage.getItem('vm_stats');
+        const hasLocalVietMixArticles = localStorage.getItem('vm_vietmix_articles');
+        if (hasLocalWords || hasLocalStats || hasLocalVietMixArticles) {
           console.log('🔄 Migrating localStorage → Firestore...');
           const result = await migrateLocalStorageToFirestore(user.uid);
 
@@ -56,6 +62,7 @@ export default function VocabMasterProWithAuth() {
             console.log(`✅ Migrated ${result.migratedWords} words`);
             localStorage.removeItem('vm_words');
             localStorage.removeItem('vm_stats');
+            localStorage.removeItem('vm_vietmix_articles');
           } else {
             console.error('❌ Migration failed:', result.error);
           }
@@ -85,6 +92,9 @@ export default function VocabMasterProWithAuth() {
       saveWords: (words) => saveWords(user.uid, words),
       saveStats: (stats) => saveStats(user.uid, stats),
       deleteWord: (wordId) => deleteWord(user.uid, wordId),
+      saveVietMixArticle: (article) => saveVietMixArticle(user.uid, article),
+      deleteVietMixArticle: (articleId) => deleteVietMixArticle(user.uid, articleId),
+      subscribeToVietMixArticles: (callback) => subscribeToVietMixArticles(user.uid, callback),
       subscribeToWords: (callback) => subscribeToWords(user.uid, callback),
       subscribeToStats: (callback) => subscribeToStats(user.uid, callback),
       deleteAllUserData: () => deleteAllUserData(user.uid),
