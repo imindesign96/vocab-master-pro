@@ -4342,10 +4342,13 @@ export default function VocabMasterPro({
 
     const filtered = useMemo(() => {
       let result = words;
+      // Filter by selected lesson first
+      if (selectedLesson) result = result.filter(w => w.lesson === selectedLesson);
+      // Then apply search and category filters
       if (search) result = result.filter(w => w.term.toLowerCase().includes(search.toLowerCase()) || w.definition.toLowerCase().includes(search.toLowerCase()));
       if (filter !== "all") result = result.filter(w => w.category === filter);
       return result;
-    }, [words, search, filter]);
+    }, [words, search, filter, selectedLesson]);
 
     const handleImport = async () => {
       const lines = importText.split("\n").filter(l => l.trim() && !l.startsWith("#"));
@@ -4508,7 +4511,37 @@ export default function VocabMasterPro({
         <input className="vm-input" value={search} onChange={e => setSearch(e.target.value)} placeholder="🔍 Search words..."
           style={{ marginBottom: 12 }}
         />
-        
+
+        {/* Lesson Selector */}
+        <div className="vm-card" style={{ padding: 12, marginBottom: 12 }}>
+          <select
+            className="vm-btn"
+            value={selectedLesson || ""}
+            onChange={(e) => setSelectedLesson(e.target.value || null)}
+            style={{
+              width: "100%",
+              padding: "10px 14px",
+              fontSize: 13,
+              fontWeight: 600,
+              borderRadius: 10,
+              background: THEME.card,
+              border: `1px solid ${THEME.border}`,
+              color: THEME.text,
+              cursor: "pointer",
+            }}
+          >
+            <option value="">📚 All Lessons ({words.length} words)</option>
+            {TOEIC_LESSONS.map(lesson => {
+              const lessonWordCount = words.filter(w => w.lesson === lesson.id).length;
+              return (
+                <option key={lesson.id} value={lesson.id}>
+                  {lesson.title} ({lessonWordCount} words)
+                </option>
+              );
+            })}
+          </select>
+        </div>
+
         <div style={{ display: "flex", gap: 6, overflowX: "auto", paddingBottom: 8, marginBottom: 16 }}>
           <button className="vm-btn" onClick={() => setFilter("all")} style={{
             padding: "6px 14px", borderRadius: 20, fontSize: 12, fontWeight: 600, whiteSpace: "nowrap",
