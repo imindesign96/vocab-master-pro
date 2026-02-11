@@ -10,7 +10,8 @@ import {
   saveStats,
   deleteWord,
   migrateLocalStorageToFirestore,
-  deleteAllUserData
+  deleteAllUserData,
+  importTOEICWords
 } from './firebase/firestoreService';
 import VocabMasterPro from './VocabMasterPro';
 import AuthScreen from './firebase/AuthScreen';
@@ -87,6 +88,7 @@ export default function VocabMasterProWithAuth() {
       subscribeToWords: (callback) => subscribeToWords(user.uid, callback),
       subscribeToStats: (callback) => subscribeToStats(user.uid, callback),
       deleteAllUserData: () => deleteAllUserData(user.uid),
+      importTOEICWords: (toeicWords, lessonIds) => importTOEICWords(user.uid, toeicWords, lessonIds),
     };
   }, [user?.uid]);
 
