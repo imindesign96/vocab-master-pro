@@ -1801,7 +1801,7 @@ export default function VocabMasterPro({
                         <div style={{ flex: 1 }}>"{ex}"</div>
                         <button
                           className="vm-btn"
-                          onClick={() => speak(ex)}
+                          onClick={(e) => { e.stopPropagation(); speak(ex); }}
                           style={{
                             background: "none",
                             color: THEME.accent,
