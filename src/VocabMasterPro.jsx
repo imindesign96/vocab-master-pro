@@ -601,6 +601,7 @@ export default function VocabMasterPro({
   });
 
   const [screen, setScreen] = useState("home");
+  const [selectedLesson, setSelectedLesson] = useState(null); // null = all lessons
 
   const [stats, setStats] = useState(() => {
     // If using Firestore, start with empty stats (will load from Firestore)
@@ -827,7 +828,13 @@ export default function VocabMasterPro({
   }, []);
   
   // Computed
-  const dueWords = useMemo(() => words.filter(w => SRSEngine.isDueForReview(w)), [words]);
+  // Filter words by selected lesson (null = all lessons)
+  const filteredWords = useMemo(() => {
+    if (!selectedLesson) return words;
+    return words.filter(w => w.lesson === selectedLesson);
+  }, [words, selectedLesson]);
+
+  const dueWords = useMemo(() => filteredWords.filter(w => SRSEngine.isDueForReview(w)), [filteredWords]);
   const masteryDist = useMemo(() => {
     const dist = [0, 0, 0, 0, 0];
     words.forEach(w => dist[SRSEngine.getMasteryLevel(w)]++);
@@ -1050,7 +1057,7 @@ export default function VocabMasterPro({
       setMode(selectedMode);
 
       // Get all available words for review (no limit)
-      const allWords = selectWordsForReview(words, dueWords, 1000);
+      const allWords = selectWordsForReview(filteredWords, dueWords, 1000);
       setAllAvailableWords(allWords);
       setCurrentBatchIndex(batchIndex);
 
@@ -1382,7 +1389,7 @@ export default function VocabMasterPro({
 
     // Mode Select
     if (!mode) {
-      const availableWords = selectWordsForReview(words || [], dueWords || [], 1000);
+      const availableWords = selectWordsForReview(filteredWords || [], dueWords || [], 1000);
       const totalAvailable = availableWords?.length || 0;
       const totalBatches = batchSize > 0 ? Math.ceil(totalAvailable / batchSize) : 0;
 
@@ -1391,6 +1398,42 @@ export default function VocabMasterPro({
           <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 20 }}>
             <button className="vm-btn" onClick={() => setScreen("home")} style={{ background: "none", color: THEME.textSecondary, fontSize: 22, padding: 4 }}>←</button>
             <div style={{ fontSize: 22, fontWeight: 800 }}>Choose Learning Mode</div>
+          </div>
+
+          {/* Lesson Selector */}
+          <div className="vm-card" style={{ padding: 16, marginBottom: 16 }}>
+            <div style={{ fontSize: 13, fontWeight: 700, color: THEME.textMuted, marginBottom: 10 }}>📚 SELECT LESSON</div>
+            <select
+              className="vm-btn"
+              value={selectedLesson || ""}
+              onChange={(e) => setSelectedLesson(e.target.value || null)}
+              style={{
+                width: "100%",
+                padding: "12px 16px",
+                fontSize: 14,
+                fontWeight: 600,
+                borderRadius: 12,
+                background: THEME.card,
+                border: `1px solid ${THEME.border}`,
+                color: THEME.text,
+                cursor: "pointer",
+              }}
+            >
+              <option value="">All Lessons ({filteredWords.length} words)</option>
+              {TOEIC_LESSONS.map(lesson => {
+                const lessonWordCount = words.filter(w => w.lesson === lesson.id).length;
+                return (
+                  <option key={lesson.id} value={lesson.id}>
+                    {lesson.title} ({lessonWordCount} words)
+                  </option>
+                );
+              })}
+            </select>
+            {selectedLesson && (
+              <div style={{ marginTop: 8, fontSize: 12, color: THEME.textSecondary }}>
+                {TOEIC_LESSONS.find(l => l.id === selectedLesson)?.description}
+              </div>
+            )}
           </div>
 
           {/* Word count info */}
@@ -2335,13 +2378,13 @@ export default function VocabMasterPro({
             return bRate - aRate; // Highest failure rate first
           });
 
-        allWords = weakWords.length > 0 ? weakWords : selectWordsForReview(words, dueWords, 1000);
+        allWords = weakWords.length > 0 ? weakWords : selectWordsForReview(filteredWords, dueWords, 1000);
         if (weakWords.length > 0 && batchIndex === 0) {
           showToast(`🎯 Focusing on ${allWords.length} weak words`, "info");
         }
       } else {
         // Normal mode: prioritize due words, then least reviewed
-        allWords = selectWordsForReview(words, dueWords, 1000);
+        allWords = selectWordsForReview(filteredWords, dueWords, 1000);
       }
 
       console.log('🚀 startReview: allWords.length =', allWords.length, 'words.length =', words.length, 'dueWords.length =', dueWords.length);
@@ -2518,7 +2561,7 @@ export default function VocabMasterPro({
             const failureRate = wrongReviews / totalReviews;
             return failureRate > 0.25;
           })
-        : selectWordsForReview(words || [], dueWords || [], 1000);
+        : selectWordsForReview(filteredWords || [], dueWords || [], 1000);
 
       const totalAvailable = availableWords?.length || 0;
       const totalBatches = batchSize > 0 ? Math.ceil(totalAvailable / batchSize) : 0;
@@ -3907,6 +3950,43 @@ export default function VocabMasterPro({
                 🚪 Sign Out
               </button>
             )}
+          </div>
+        )}
+
+        {/* Import TOEIC Vocabulary */}
+        {firestoreService && userId && (
+          <div className="vm-card" style={{ padding: 20, marginBottom: 16 }}>
+            <div style={{ fontSize: 16, fontWeight: 700, marginBottom: 12, display: "flex", alignItems: "center", gap: 8 }}>
+              📚 <span>TOEIC Vocabulary</span>
+            </div>
+            <div style={{ fontSize: 13, color: THEME.textSecondary, marginBottom: 16 }}>
+              Import 934 essential TOEIC words across 19 lessons into your collection
+            </div>
+            <button
+              className="vm-btn"
+              onClick={async () => {
+                if (confirm(`Import ${getAllTOEICWords().length} TOEIC words to your collection?`)) {
+                  try {
+                    showToast("📚 Importing TOEIC vocabulary...", "warning");
+                    const result = await firestoreService.importTOEICWords(getAllTOEICWords());
+                    if (result.success) {
+                      showToast(`✅ Imported ${result.imported} words! (${result.skipped} already existed)`, "success");
+                    } else {
+                      showToast("❌ Import failed: " + result.error.message, "danger");
+                    }
+                  } catch (error) {
+                    showToast("❌ Error: " + error.message, "danger");
+                  }
+                }
+              }}
+              style={{
+                width: "100%", padding: 14, borderRadius: 12,
+                background: THEME.gradient1, color: "#fff", fontSize: 14,
+                fontWeight: 600, boxShadow: `0 4px 16px ${THEME.accentGlow}`
+              }}
+            >
+              📥 Import TOEIC Words
+            </button>
           </div>
         )}
 

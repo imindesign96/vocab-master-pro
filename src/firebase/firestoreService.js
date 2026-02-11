@@ -182,6 +182,56 @@ export const subscribeToStats = (userId, callback) => {
 };
 
 // ────────────────────────────────────────────────────────────
+// TOEIC VOCABULARY IMPORT
+// ────────────────────────────────────────────────────────────
+
+/**
+ * Import TOEIC vocabulary lessons to user's collection
+ * @param {string} userId - User ID
+ * @param {Array} toeicWords - Array of TOEIC words from getAllTOEICWords()
+ * @param {Array} lessonIds - Optional: array of lesson IDs to import (e.g. ['lesson-1', 'lesson-2'])
+ *                            If not provided, imports all lessons
+ */
+export const importTOEICWords = async (userId, toeicWords, lessonIds = null) => {
+  try {
+    // Filter by lesson IDs if provided
+    let wordsToImport = toeicWords;
+    if (lessonIds && lessonIds.length > 0) {
+      wordsToImport = toeicWords.filter(word => lessonIds.includes(word.lesson));
+    }
+
+    console.log(`📚 Importing ${wordsToImport.length} TOEIC words...`);
+
+    // Check which words already exist
+    const existingWordsResult = await getWords(userId);
+    const existingWordIds = new Set(
+      existingWordsResult.data.map(w => w.id)
+    );
+
+    // Only import words that don't exist yet
+    const newWords = wordsToImport.filter(word => !existingWordIds.has(word.id));
+
+    if (newWords.length === 0) {
+      console.log('✅ All TOEIC words already imported');
+      return { success: true, imported: 0, skipped: wordsToImport.length };
+    }
+
+    // Use batch save
+    await saveWords(userId, newWords);
+
+    console.log(`✅ Imported ${newWords.length} new TOEIC words (${wordsToImport.length - newWords.length} already existed)`);
+    return {
+      success: true,
+      imported: newWords.length,
+      skipped: wordsToImport.length - newWords.length
+    };
+  } catch (error) {
+    console.error('Error importing TOEIC words:', error);
+    return { success: false, error, imported: 0, skipped: 0 };
+  }
+};
+
+// ────────────────────────────────────────────────────────────
 // MIGRATION HELPERS
 // ────────────────────────────────────────────────────────────
 
