@@ -225,7 +225,9 @@ const selectWordsForReview = (allWords, dueWords, limit) => {
 const speak = (text, rate = 0.85) => {
   if ("speechSynthesis" in window) {
     window.speechSynthesis.cancel();
-    const u = new SpeechSynthesisUtterance(text);
+    // Remove Vietnamese translation (everything from '(' onwards)
+    const englishOnly = text.split('(')[0].trim();
+    const u = new SpeechSynthesisUtterance(englishOnly);
     u.lang = "en-US";
     u.rate = rate;
     u.pitch = 1;
@@ -538,7 +540,24 @@ const WordCard = ({ word, showDef, onFlip, compact }) => {
                   padding: "10px 14px", borderRadius: 10, marginBottom: 6,
                   background: THEME.surface, borderLeft: `3px solid ${THEME.accent}40`,
                   fontSize: 14, color: THEME.textSecondary, lineHeight: 1.5, fontStyle: "italic",
-                }}>"{ex}"</div>
+                  display: "flex", alignItems: "center", gap: 8
+                }}>
+                  <div style={{ flex: 1 }}>"{ex}"</div>
+                  <button
+                    className="vm-btn"
+                    onClick={(e) => { e.stopPropagation(); speak(ex); }}
+                    style={{
+                      background: "none",
+                      color: THEME.accent,
+                      fontSize: 18,
+                      padding: 4,
+                      flexShrink: 0
+                    }}
+                    title="Listen to example"
+                  >
+                    🔊
+                  </button>
+                </div>
               ))}
             </div>
           )}
@@ -1774,9 +1793,26 @@ export default function VocabMasterPro({
                         fontSize: 13,
                         color: THEME.textSecondary,
                         fontStyle: "italic",
-                        marginBottom: 8
+                        marginBottom: 8,
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 8
                       }}>
-                        "{ex}"
+                        <div style={{ flex: 1 }}>"{ex}"</div>
+                        <button
+                          className="vm-btn"
+                          onClick={() => speak(ex)}
+                          style={{
+                            background: "none",
+                            color: THEME.accent,
+                            fontSize: 18,
+                            padding: 4,
+                            flexShrink: 0
+                          }}
+                          title="Listen to example"
+                        >
+                          🔊
+                        </button>
                       </div>
                     ))}
                   </div>
@@ -3615,7 +3651,23 @@ export default function VocabMasterPro({
                   <div style={{ padding: "0 16px 14px", animation: "vmFadeIn 0.2s ease" }}>
                     <div style={{ height: 1, background: THEME.border, marginBottom: 12 }} />
                     {word.examples?.length > 0 && word.examples.map((ex, i) => (
-                      <div key={i} style={{ fontSize: 13, color: THEME.textSecondary, marginBottom: 4, fontStyle: "italic" }}>• "{ex}"</div>
+                      <div key={i} style={{ fontSize: 13, color: THEME.textSecondary, marginBottom: 4, fontStyle: "italic", display: "flex", alignItems: "center", gap: 6 }}>
+                        <div style={{ flex: 1 }}>• "{ex}"</div>
+                        <button
+                          className="vm-btn"
+                          onClick={(e) => { e.stopPropagation(); speak(ex); }}
+                          style={{
+                            background: "none",
+                            color: THEME.accent,
+                            fontSize: 16,
+                            padding: 2,
+                            flexShrink: 0
+                          }}
+                          title="Listen to example"
+                        >
+                          🔊
+                        </button>
+                      </div>
                     ))}
                     {word.synonyms?.length > 0 && (
                       <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginTop: 8 }}>
