@@ -297,8 +297,8 @@ async function extractMedia(zip, mediaMap, filename, type) {
 
     const buf = await entry.async('arraybuffer');
 
-    // Size limits to protect Firestore document limit (1MB)
-    const maxBytes = type === 'audio' ? 600 * 1024 : 400 * 1024;
+    // Media is stored in IndexedDB (not Firestore) — can be larger
+    const maxBytes = type === 'audio' ? 600 * 1024 : 800 * 1024;
     if (buf.byteLength > maxBytes) {
       console.warn(`[apkg] skipping large ${type}: ${filename} (${(buf.byteLength/1024).toFixed(0)}KB)`);
       return null;

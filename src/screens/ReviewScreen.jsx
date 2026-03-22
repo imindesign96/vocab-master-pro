@@ -229,11 +229,6 @@ export default function ReviewScreen({ cards, uid, onDone, onCardUpdated, newPer
             <p className="q-trans">🇻🇳 {card.translation}</p>
           )}
 
-          {/* Image (always visible) */}
-          {media.imageData && (
-            <img className="q-image" src={media.imageData} alt="" />
-          )}
-
           {/* Input */}
           <div className="q-input-row">
             <input
@@ -301,6 +296,11 @@ export default function ReviewScreen({ cards, uid, onDone, onCardUpdated, newPer
                 />
               )}
             </div>
+
+            {/* Image — shown after answer revealed */}
+            {media.imageData && (
+              <img className="q-image" src={media.imageData} alt="" />
+            )}
 
             {/* Full word + phonetic */}
             <div className="revealed-word">
