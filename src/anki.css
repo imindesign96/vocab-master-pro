@@ -25,11 +25,22 @@
   --radius-sm: 10px;
 }
 
-html, body, #root { height: 100%; width: 100%; overflow: hidden; }
+html, body {
+  height: 100%; width: 100%; overflow: hidden;
+  background: #07101f;
+}
+
+#root {
+  height: 100%; width: 100%;
+  display: flex;
+  justify-content: center;
+  align-items: stretch;
+  overflow: hidden;
+  background: #07101f;
+}
 
 body {
   font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-  background: var(--bg);
   color: var(--text);
   -webkit-font-smoothing: antialiased;
   overscroll-behavior: none;
@@ -44,10 +55,31 @@ input, select, textarea { font-family: inherit; color: var(--text); }
 .app {
   display: flex;
   flex-direction: column;
+  width: 100%;
+  max-width: 430px;      /* iPhone 14 Pro Max */
   height: 100%;
-  max-width: 480px;
-  margin: 0 auto;
+  background: var(--bg);
   position: relative;
+  overflow: hidden;
+}
+
+/* ── Desktop: phone-in-browser frame ───────────────── */
+@media (min-width: 600px) {
+  #root {
+    align-items: center;
+    background:
+      radial-gradient(ellipse at 60% 20%, #1e2d4a 0%, #07101f 70%);
+  }
+  .app {
+    height: min(932px, calc(100vh - 48px)); /* iPhone 14 Pro Max h */
+    border-radius: 50px;
+    overflow: hidden;
+    box-shadow:
+      0 0 0 1px #ffffff1a,
+      0 0 0 12px #141e30,
+      0 0 0 13px #ffffff12,
+      0 40px 100px rgba(0,0,0,0.8);
+  }
 }
 
 .user-bar {
