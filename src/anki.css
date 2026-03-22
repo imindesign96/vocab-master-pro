@@ -56,29 +56,18 @@ input, select, textarea { font-family: inherit; color: var(--text); }
   display: flex;
   flex-direction: column;
   width: 100%;
-  max-width: 430px;      /* iPhone 14 Pro Max */
   height: 100%;
   background: var(--bg);
   position: relative;
   overflow: hidden;
 }
 
-/* ── Desktop: phone-in-browser frame ───────────────── */
-@media (min-width: 600px) {
-  #root {
-    align-items: center;
-    background:
-      radial-gradient(ellipse at 60% 20%, #1e2d4a 0%, #07101f 70%);
-  }
-  .app {
-    height: min(932px, calc(100vh - 48px)); /* iPhone 14 Pro Max h */
-    border-radius: 50px;
-    overflow: hidden;
-    box-shadow:
-      0 0 0 1px #ffffff1a,
-      0 0 0 12px #141e30,
-      0 0 0 13px #ffffff12,
-      0 40px 100px rgba(0,0,0,0.8);
+/* ── Mobile: fit iPhone 14 Pro Max (430px) ─────────── */
+@media (max-width: 600px) {
+  html, body, #root, .app {
+    width: 100%;
+    max-width: 430px;
+    margin: 0 auto;
   }
 }
 
