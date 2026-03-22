@@ -62,10 +62,25 @@ input, select, textarea { font-family: inherit; color: var(--text); }
   overflow: hidden;
 }
 
+/* ── Desktop: centered card, comfortable reading width ── */
+@media (min-width: 601px) {
+  #root {
+    display: flex;
+    justify-content: center;
+    align-items: stretch;
+    background: #0a1628;
+  }
+  .app {
+    max-width: 720px;       /* comfortable UX width — ~50% on 1440px screen */
+    width: 100%;
+    border-left:  1px solid var(--border);
+    border-right: 1px solid var(--border);
+  }
+}
+
 /* ── Mobile: fit iPhone 14 Pro Max (430px) ─────────── */
 @media (max-width: 600px) {
-  html, body, #root, .app {
-    width: 100%;
+  .app {
     max-width: 430px;
     margin: 0 auto;
   }
