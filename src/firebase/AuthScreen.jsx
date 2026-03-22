@@ -100,8 +100,8 @@ export default function AuthScreen({ onAuthSuccess }) {
               transition: 'all 0.2s',
               boxShadow: '0 2px 8px rgba(0,0,0,0.1)'
             }}
-            onMouseOver={(e) => !loading && (e.target.style.boxShadow = '0 4px 12px rgba(0,0,0,0.15)')}
-            onMouseOut={(e) => !loading && (e.target.style.boxShadow = '0 2px 8px rgba(0,0,0,0.1)')}
+            onMouseOver={(e) => !loading && (e.currentTarget.style.boxShadow = '0 4px 12px rgba(0,0,0,0.15)')}
+            onMouseOut={(e) => !loading && (e.currentTarget.style.boxShadow = '0 2px 8px rgba(0,0,0,0.1)')}
           >
             {loading ? (
               <div style={{ fontSize: 14 }}>Signing in...</div>
