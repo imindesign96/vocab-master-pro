@@ -95,12 +95,18 @@ export async function deleteCard(uid, cardId, deckId) {
 
 /**
  * Batch import cards into a deck.
- * TEXT fields → Firestore (stays well under 1MB/doc limit)
- * MEDIA fields → IndexedDB (audio/images can be several MB per card)
+ * TEXT + audioWord → Firestore (syncs across devices; word audio ~50KB fits fine)
+ * audioExA/audioExB/imageData → IndexedDB only (too large for Firestore)
+ *
+ * audioWord stored in Firestore only when base64 string ≤ 400KB to keep
+ * each Firestore doc safely under 1MB.
  */
+const FIRESTORE_AUDIO_MAX = 400 * 1024; // 400KB base64 string
+
 export async function batchImportCards(uid, deckId, cards, onProgress) {
-  const BATCH_SIZE = 200; // text-only docs are tiny — 200/batch is fine
-  const PARALLEL   = 5;
+  // Smaller batches because some docs include audio data
+  const BATCH_SIZE = 15;
+  const PARALLEL   = 4;
 
   const allChunks = [];
   for (let i = 0; i < cards.length; i += BATCH_SIZE) {
@@ -108,7 +114,7 @@ export async function batchImportCards(uid, deckId, cards, onProgress) {
   }
 
   let imported = 0;
-  const allMediaEntries = []; // [{id, audioWord, audioExA, audioExB, imageData}]
+  const allMediaEntries = []; // [{id, audioExA, audioExB, imageData}] for IndexedDB
 
   for (let g = 0; g < allChunks.length; g += PARALLEL) {
     const group = allChunks.slice(g, g + PARALLEL);
@@ -119,7 +125,12 @@ export async function batchImportCards(uid, deckId, cards, onProgress) {
 
       chunk.forEach(card => {
         const ref = doc(collection(db, 'users', uid, 'cards'));
-        // Only text fields in Firestore — keeps each doc well under 1MB
+
+        // Store audioWord in Firestore if small enough → cross-device sync
+        const audioWordFs = card.audioWord &&
+          card.audioWord.length <= FIRESTORE_AUDIO_MAX
+          ? card.audioWord : null;
+
         batch.set(ref, {
           deckId,
           front:       card.front       || '',
@@ -133,13 +144,15 @@ export async function batchImportCards(uid, deckId, cards, onProgress) {
           examplesVn:  card.examplesVn  || [],
           translation: card.translation || '',
           tags:        card.tags        || [],
+          audioWord:   audioWordFs      || '',   // ← synced via Firestore
           createdAt:   serverTimestamp(),
           ...createCard(),
         });
-        // Collect media keyed by the Firestore doc ID
+
+        // Larger media stays local (IndexedDB only)
         entries.push({
           id:        ref.id,
-          audioWord: card.audioWord || null,
+          audioWord: card.audioWord || null,   // full version (may be larger)
           audioExA:  card.audioExA  || null,
           audioExB:  card.audioExB  || null,
           imageData: card.imageData || null,
@@ -155,7 +168,7 @@ export async function batchImportCards(uid, deckId, cards, onProgress) {
     if (onProgress) onProgress(Math.min(imported, cards.length), cards.length);
   }
 
-  // Persist all media to IndexedDB in one transaction
+  // Persist all media to IndexedDB (for local fast access + examples/images)
   await storeMediaBatch(allMediaEntries);
 
   await updateDeckCount(uid, deckId);

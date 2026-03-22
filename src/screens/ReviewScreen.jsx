@@ -110,12 +110,15 @@ export default function ReviewScreen({ cards, uid, onDone, onCardUpdated, newPer
     setLastWrong('');
   }, [current, card?.id]);
 
+  // Resolve audioWord: IndexedDB (local, full quality) → Firestore (synced) → TTS
+  const audioWord = media.audioWord || card?.audioWord || null;
+
   // Auto-play word audio when question appears (after media loaded)
   useEffect(() => {
     if (!card || checked) return;
-    const t = setTimeout(() => playAudio(media.audioWord, card.front), 400);
+    const t = setTimeout(() => playAudio(audioWord, card.front), 400);
     return () => clearTimeout(t);
-  }, [card?.id, media.audioWord]); // fires once media is loaded for new card
+  }, [card?.id, audioWord]); // fires once media/card audio is ready
 
   // Focus input when not checked
   useEffect(() => {
@@ -218,7 +221,7 @@ export default function ReviewScreen({ cards, uid, onDone, onCardUpdated, newPer
             <p className="q-masked">{masked}</p>
             <button
               className="q-replay-btn"
-              onClick={() => playAudio(media.audioWord, card?.front)}
+              onClick={() => playAudio(audioWord, card?.front)}
               title="Play audio"
             >🔊</button>
           </div>
@@ -277,7 +280,7 @@ export default function ReviewScreen({ cards, uid, onDone, onCardUpdated, newPer
             <div className="audio-row">
               <AudioBtn
                 label="Word"
-                dataUrl={media.audioWord}
+                dataUrl={audioWord}
                 fallback={card.front}
                 autoPlay
               />
