@@ -11,9 +11,18 @@ import AddScreen from './screens/AddScreen';
 import StatsScreen from './screens/StatsScreen';
 import ReviewScreen from './screens/ReviewScreen';
 
+// Read cached user info synchronously (before Firebase Auth resolves)
+function readCachedUser() {
+  try { return JSON.parse(localStorage.getItem('flashanki_user_cache') || 'null'); } catch { return null; }
+}
+function readCache(key) {
+  try { return JSON.parse(localStorage.getItem(key) || '[]'); } catch { return []; }
+}
+
 export default function AnkiApp() {
-  const [user, setUser] = useState(null);
-  const [authLoading, setAuthLoading] = useState(true);
+  // Start with cached user → app renders immediately, no blank wait
+  const [user, setUser] = useState(readCachedUser);
+  const [authReady, setAuthReady] = useState(false); // true once Firebase confirms
   const [tab, setTab] = useState('today');
   const [reviewing, setReviewing] = useState(false);
   const [newPerDay, setNewPerDay] = useState(
@@ -24,26 +33,38 @@ export default function AnkiApp() {
     localStorage.setItem('flashanki_new_per_day', v);
   }, []);
 
-  // Load from localStorage cache instantly (before Firestore responds)
-  const [decks, setDecks] = useState(() => {
-    try { return JSON.parse(localStorage.getItem('flashanki_decks_cache') || '[]'); } catch { return []; }
-  });
-  const [cards, setCards] = useState(() => {
-    try { return JSON.parse(localStorage.getItem('flashanki_cards_cache') || '[]'); } catch { return []; }
-  });
+  // Load decks/cards instantly from localStorage cache
+  const [decks, setDecks] = useState(() => readCache('flashanki_decks_cache'));
+  const [cards, setCards] = useState(() => readCache('flashanki_cards_cache'));
 
-  // Auth
-  useEffect(() => onAuthStateChanged(auth, u => { setUser(u); setAuthLoading(false); }), []);
+  // Auth — verify in background, update if changed
+  useEffect(() => onAuthStateChanged(auth, u => {
+    setUser(u);
+    setAuthReady(true);
+    if (u) {
+      // Keep user cache fresh
+      try {
+        localStorage.setItem('flashanki_user_cache', JSON.stringify({
+          uid: u.uid,
+          displayName: u.displayName,
+          photoURL: u.photoURL,
+          email: u.email,
+        }));
+      } catch {}
+    } else {
+      // Signed out — clear everything
+      localStorage.removeItem('flashanki_user_cache');
+      localStorage.removeItem('flashanki_decks_cache');
+      localStorage.removeItem('flashanki_cards_cache');
+    }
+  }), []);
+
   const signIn = () => signInWithPopup(auth, new GoogleAuthProvider());
-  const handleSignOut = () => {
-    signOut(auth);
-    localStorage.removeItem('flashanki_decks_cache');
-    localStorage.removeItem('flashanki_cards_cache');
-  };
+  const handleSignOut = () => signOut(auth); // cache cleared in onAuthStateChanged
 
-  // Real-time Firestore — update state + write-through to localStorage cache
+  // Real-time Firestore — runs once Firebase auth is confirmed
   useEffect(() => {
-    if (!user) { setDecks([]); setCards([]); return; }
+    if (!user?.uid) { return; }
     const unsubDecks = subscribeToDecks(user.uid, (d) => {
       setDecks(d);
       try { localStorage.setItem('flashanki_decks_cache', JSON.stringify(d)); } catch {}
@@ -51,36 +72,31 @@ export default function AnkiApp() {
     const unsubCards = subscribeToCards(user.uid, null, (c) => {
       setCards(c);
       try {
-        // Strip large media fields before caching (keep doc small)
+        // Strip large media fields — keep cache small
         const slim = c.map(({ audioWord, imageData, ...rest }) => rest);
         localStorage.setItem('flashanki_cards_cache', JSON.stringify(slim));
       } catch {}
     });
     return () => { unsubDecks(); unsubCards(); };
-  }, [user]);
+  }, [user?.uid]);
 
   // One-time migration: push IndexedDB media → Firestore (runs silently in bg)
   useEffect(() => {
-    if (!user) return;
+    if (!user?.uid) return;
     const key = `flashanki_media_migrated_${user.uid}`;
-    if (localStorage.getItem(key)) return; // already done
+    if (localStorage.getItem(key)) return;
     migrateMediaToFirestore(user.uid).then(({ updated }) => {
       if (updated > 0) console.log(`[migration] pushed ${updated} media entries to Firestore`);
       localStorage.setItem(key, '1');
     }).catch(() => {});
-  }, [user]);
+  }, [user?.uid]);
 
   const handleCardUpdated = useCallback((updated) => {
     setCards(prev => prev.map(c => c.id === updated.id ? { ...c, ...updated } : c));
   }, []);
 
-  // ── Loading ──────────────────────────────────────────
-  if (authLoading) {
-    return <div className="loading-screen"><div className="spinner" /></div>;
-  }
-
-  // ── Auth screen ──────────────────────────────────────
-  if (!user) {
+  // ── Auth screen — only if no cached user AND auth confirmed not logged in ──
+  if (!user && authReady) {
     return (
       <div className="auth-screen">
         <div className="auth-content">
@@ -116,6 +132,11 @@ export default function AnkiApp() {
     );
   }
 
+  // ── Show nothing while auth resolves and no cache ────
+  if (!user) {
+    return <div className="loading-screen"><div className="spinner" /></div>;
+  }
+
   // ── Main app ─────────────────────────────────────────
   return (
     <div className="app">
@@ -126,6 +147,11 @@ export default function AnkiApp() {
         </div>
         <button className="signout-btn" onClick={handleSignOut}>Sign out</button>
       </div>
+      {/* Subtle sync indicator — shown only while Firestore hasn't responded yet */}
+      {!authReady && (
+        <div style={{ height: 2, background: 'var(--accent)', opacity: 0.6,
+          animation: 'pulse 1s ease-in-out infinite', flexShrink: 0 }} />
+      )}
 
       <div className="screen-container">
         {tab === 'today' && (
