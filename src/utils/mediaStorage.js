@@ -71,6 +71,36 @@ export async function getMedia(cardId) {
 }
 
 /**
+ * Get all media entries from IndexedDB.
+ * Returns: Array<{ id, audioWord?, audioExA?, audioExB?, imageData? }>
+ */
+export async function getAllMedia() {
+  try {
+    const db = await openDB();
+    return await new Promise((resolve, reject) => {
+      const tx    = db.transaction(STORE, 'readonly');
+      const store = tx.objectStore(STORE);
+      const results = [];
+      const reqKeys = store.getAllKeys();
+      reqKeys.onsuccess = e => {
+        const keys = e.target.result;
+        const reqVals = store.getAll();
+        reqVals.onsuccess = ev => {
+          ev.target.result.forEach((val, i) => {
+            results.push({ id: keys[i], ...val });
+          });
+          resolve(results);
+        };
+        reqVals.onerror = err => reject(err.target.error);
+      };
+      reqKeys.onerror = err => reject(err.target.error);
+    });
+  } catch {
+    return [];
+  }
+}
+
+/**
  * Delete media for a list of card IDs (called when deleting a deck).
  */
 export async function deleteMediaBatch(cardIds) {

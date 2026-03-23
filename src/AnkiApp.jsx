@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { onAuthStateChanged, signInWithPopup, GoogleAuthProvider, signOut } from 'firebase/auth';
 import { auth } from './firebase/config';
-import { subscribeToDecks, subscribeToCards } from './firebase/cardService';
+import { subscribeToDecks, subscribeToCards, migrateMediaToFirestore } from './firebase/cardService';
 
 import { DEFAULT_NEW_PER_DAY } from './utils/srsEngine';
 import BottomNav from './components/BottomNav';
@@ -38,6 +38,17 @@ export default function AnkiApp() {
     const unsubDecks = subscribeToDecks(user.uid, setDecks);
     const unsubCards = subscribeToCards(user.uid, null, setCards);
     return () => { unsubDecks(); unsubCards(); };
+  }, [user]);
+
+  // One-time migration: push IndexedDB media → Firestore (runs silently in bg)
+  useEffect(() => {
+    if (!user) return;
+    const key = `flashanki_media_migrated_${user.uid}`;
+    if (localStorage.getItem(key)) return; // already done
+    migrateMediaToFirestore(user.uid).then(({ updated }) => {
+      if (updated > 0) console.log(`[migration] pushed ${updated} media entries to Firestore`);
+      localStorage.setItem(key, '1');
+    }).catch(() => {});
   }, [user]);
 
   const handleCardUpdated = useCallback((updated) => {

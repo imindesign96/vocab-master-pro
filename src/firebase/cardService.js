@@ -10,7 +10,7 @@ import {
 } from 'firebase/firestore';
 import { db } from './config';
 import { createCard } from '../utils/srsEngine';
-import { storeMediaBatch, deleteMediaBatch } from '../utils/mediaStorage';
+import { storeMediaBatch, deleteMediaBatch, getAllMedia } from '../utils/mediaStorage';
 
 // ── Decks ─────────────────────────────────────────────
 
@@ -181,6 +181,57 @@ export async function batchImportCards(uid, deckId, cards, onProgress) {
   await storeMediaBatch(allMediaEntries);
 
   await updateDeckCount(uid, deckId);
+}
+
+// ── Media migration ───────────────────────────────────
+
+/**
+ * One-time migration: push imageData + audioWord from IndexedDB → Firestore
+ * for cards that are missing these fields. Preserves all SRS history.
+ * Safe to call multiple times (skips cards that already have the field).
+ */
+export async function migrateMediaToFirestore(uid, onProgress) {
+  const allMedia = await getAllMedia();
+  if (!allMedia.length) return { updated: 0, skipped: 0 };
+
+  // Only migrate entries that have imageData or audioWord
+  const toMigrate = allMedia.filter(m => m.imageData || m.audioWord);
+  if (!toMigrate.length) return { updated: 0, skipped: 0 };
+
+  let updated = 0, skipped = 0;
+  const GROUP = 10;
+
+  for (let i = 0; i < toMigrate.length; i += GROUP) {
+    const group = toMigrate.slice(i, i + GROUP);
+    await Promise.all(group.map(async (m) => {
+      try {
+        const cardRef = doc(db, 'users', uid, 'cards', m.id);
+        const updates = {};
+
+        if (m.audioWord && m.audioWord.length <= FIRESTORE_AUDIO_MAX) {
+          updates.audioWord = m.audioWord;
+        }
+        const audioSize = updates.audioWord ? updates.audioWord.length : 0;
+        if (m.imageData &&
+            m.imageData.length <= FIRESTORE_IMAGE_MAX &&
+            audioSize + m.imageData.length <= 750 * 1024) {
+          updates.imageData = m.imageData;
+        }
+
+        if (Object.keys(updates).length > 0) {
+          await updateDoc(cardRef, updates);
+          updated++;
+        } else {
+          skipped++;
+        }
+      } catch {
+        skipped++;
+      }
+    }));
+    if (onProgress) onProgress(Math.min(i + GROUP, toMigrate.length), toMigrate.length);
+  }
+
+  return { updated, skipped };
 }
 
 // ── Stats ─────────────────────────────────────────────
