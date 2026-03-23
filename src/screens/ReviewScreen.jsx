@@ -33,42 +33,27 @@ function playAudio(dataUrl, fallbackText) {
 }
 
 /**
- * Mask word for hint display.
- * Shows first + last letter of each word, hides the middle with `_` per char.
- * "attract"  → "a_____t"
- * "abide by" → "a___e by"
- * "go"       → "go"
- *
- * If the card has a `suggestion` field from the deck, clean it up and use that.
+ * Progressive mask — reveals more letters from outside-in on each wrong attempt.
+ * attempt=0: first + last only         "attract"  → "a_____t"
+ * attempt=1: +2 chars from outside-in  "attract"  → "at___ct"
+ * attempt=2: +2 more                   "attract"  → "att_act"
+ * attempt≥3: fully revealed            "attract"  → "attract"
  */
-function maskWord(word) {
+function maskWordProgressive(word, attempt) {
   return word.split(' ').map(w => {
     if (!w) return '';
     if (w.length <= 2) return w;
-    const hidden = '_'.repeat(w.length - 2);
-    return w[0] + hidden + w[w.length - 1];
+    const chars = w.split('');
+    const revealed = new Set([0, w.length - 1]); // always show first + last
+    // Each attempt reveals 2 more chars (one from each side)
+    let left = 1, right = w.length - 2;
+    let extra = attempt * 2; // 2 more chars per wrong attempt
+    while (extra > 0 && left <= right) {
+      revealed.add(left++); extra--;
+      if (extra > 0 && left <= right) { revealed.add(right--); extra--; }
+    }
+    return chars.map((c, i) => revealed.has(i) ? c : '_').join('');
   }).join(' ');
-}
-
-/**
- * Clean up a deck-provided suggestion field.
- * - Replace `__` with `_` (one underscore per hidden letter)
- * - For single-word answers: remove ALL spaces inside the suggestion
- * - For multi-word answers: keep one space between words
- */
-function cleanSuggestion(sug, front) {
-  if (!sug) return '';
-  let s = sug.replace(/__/g, '_').trim();
-
-  const wordCount = (front || '').split(' ').filter(Boolean).length;
-  if (wordCount <= 1) {
-    // Single word — suggestion must have no spaces at all
-    s = s.replace(/\s+/g, '');
-  } else {
-    // Multi-word — collapse multiple spaces to one
-    s = s.replace(/\s{2,}/g, ' ');
-  }
-  return s;
 }
 
 /** Exact match only — no fuzzy. Case-insensitive, trim whitespace. */
@@ -90,6 +75,7 @@ export default function ReviewScreen({ cards, uid, onDone, onCardUpdated, newPer
   const [lastWrong, setLastWrong] = useState('');     // last wrong typed value
   const [stats, setStats]         = useState({ reviewed: 0, rightFirst: 0 });
   const [media, setMedia]         = useState({});     // IDB media for current card
+  const [retrying, setRetrying]   = useState(false);  // true after "Học lại" pressed
   const MAX_ATTEMPTS = 3;
   const inputRef = useRef(null);
 
@@ -108,10 +94,12 @@ export default function ReviewScreen({ cards, uid, onDone, onCardUpdated, newPer
     setCorrect(false);
     setAttempts(0);
     setLastWrong('');
+    setRetrying(false);
   }, [current, card?.id]);
 
-  // Resolve audioWord: IndexedDB (local, full quality) → Firestore (synced) → TTS
+  // Resolve media: IndexedDB (local, full quality) → Firestore (synced) → TTS
   const audioWord = media.audioWord || card?.audioWord || null;
+  const imageData = media.imageData || card?.imageData || null;
 
   // Auto-play word audio when question appears (after media loaded)
   useEffect(() => {
@@ -190,12 +178,10 @@ export default function ReviewScreen({ cards, uid, onDone, onCardUpdated, newPer
     );
   }
 
-  const total   = queue.current.length;
+  const total    = queue.current.length;
   const progress = current / Math.max(total, 1);
-  // Use deck suggestion (cleaned) if available, else compute from front
-  const masked = card
-    ? (card.suggestion ? cleanSuggestion(card.suggestion, card.front) : maskWord(card.front))
-    : '';
+  // Progressive mask: reveals more letters per wrong attempt
+  const masked = card ? maskWordProgressive(card.front, attempts) : '';
 
   // ── Render ────────────────────────────────────────────
   return (
@@ -251,7 +237,7 @@ export default function ReviewScreen({ cards, uid, onDone, onCardUpdated, newPer
             <div className="retry-feedback">
               <span className="retry-wrong">✗ "{lastWrong}"</span>
               <span className="retry-remaining">
-                {MAX_ATTEMPTS - attempts} attempt{MAX_ATTEMPTS - attempts !== 1 ? 's' : ''} left
+                {MAX_ATTEMPTS - attempts} lần còn lại
               </span>
             </div>
           )}
@@ -268,11 +254,21 @@ export default function ReviewScreen({ cards, uid, onDone, onCardUpdated, newPer
           <div className="result-card">
             {correct
               ? <p className="result-correct">
-                  ✓ Correct!{attempts > 0 ? ` (${attempts + 1} attempt${attempts > 1 ? 's' : ''})` : ''}
+                  ✓ Đúng!{attempts > 0 ? ` (sau ${attempts + 1} lần)` : ''}
                 </p>
               : <div className="result-wrong">
-                  <p>✗ You typed: <span className="typed-text">"{lastWrong || typed}"</span></p>
-                  <p>✓ Answer: <span className="answer-text">"{card.front}"</span></p>
+                  <p>✗ Bạn nhập: <span className="typed-text">"{lastWrong || typed}"</span></p>
+                  <p>✓ Đáp án: <span className="answer-text">"{card.front}"</span></p>
+                  <button
+                    className="retry-again-btn"
+                    onClick={() => {
+                      setChecked(false);
+                      setTyped('');
+                      setAttempts(0);
+                      setLastWrong('');
+                      setRetrying(true);
+                    }}
+                  >🔄 Học lại</button>
                 </div>
             }
 
@@ -300,9 +296,9 @@ export default function ReviewScreen({ cards, uid, onDone, onCardUpdated, newPer
               )}
             </div>
 
-            {/* Image — shown after answer revealed */}
-            {media.imageData && (
-              <img className="q-image" src={media.imageData} alt="" />
+            {/* Image — IndexedDB (local) → Firestore (synced) */}
+            {imageData && (
+              <img className="q-image" src={imageData} alt="" />
             )}
 
             {/* Full word + phonetic */}

@@ -1276,6 +1276,19 @@ input, select, textarea { font-family: inherit; color: var(--text); }
   font-weight: 600;
 }
 
+.retry-again-btn {
+  margin-top: 10px;
+  width: 100%;
+  padding: 10px;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--accent2);
+  text-align: center;
+}
+
 /* ── Deck deleting state ────────────────────────────── */
 .deck-card.deleting { opacity: 0.5; pointer-events: none; }
 .import-phase { font-size: 14px; color: var(--text-muted); margin-bottom: 6px; }

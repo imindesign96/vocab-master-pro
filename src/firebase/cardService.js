@@ -101,7 +101,9 @@ export async function deleteCard(uid, cardId, deckId) {
  * audioWord stored in Firestore only when base64 string ≤ 400KB to keep
  * each Firestore doc safely under 1MB.
  */
-const FIRESTORE_AUDIO_MAX = 400 * 1024; // 400KB base64 string
+const FIRESTORE_AUDIO_MAX = 400 * 1024;  // 400KB base64 — for audioWord
+const FIRESTORE_IMAGE_MAX = 300 * 1024;  // 300KB base64 — for imageData
+// Combined budget per doc kept under ~800KB so full doc stays < 1MB
 
 export async function batchImportCards(uid, deckId, cards, onProgress) {
   // Smaller batches because some docs include audio data
@@ -126,10 +128,16 @@ export async function batchImportCards(uid, deckId, cards, onProgress) {
       chunk.forEach(card => {
         const ref = doc(collection(db, 'users', uid, 'cards'));
 
-        // Store audioWord in Firestore if small enough → cross-device sync
+        // Store audioWord + imageData in Firestore if small enough → cross-device sync
         const audioWordFs = card.audioWord &&
           card.audioWord.length <= FIRESTORE_AUDIO_MAX
           ? card.audioWord : null;
+
+        const audioSize  = audioWordFs ? audioWordFs.length : 0;
+        const imageDataFs = card.imageData &&
+          card.imageData.length <= FIRESTORE_IMAGE_MAX &&
+          (audioSize + card.imageData.length) <= 750 * 1024
+          ? card.imageData : null;
 
         batch.set(ref, {
           deckId,
@@ -144,7 +152,8 @@ export async function batchImportCards(uid, deckId, cards, onProgress) {
           examplesVn:  card.examplesVn  || [],
           translation: card.translation || '',
           tags:        card.tags        || [],
-          audioWord:   audioWordFs      || '',   // ← synced via Firestore
+          audioWord:   audioWordFs      || '',  // ← synced via Firestore
+          imageData:   imageDataFs      || '',  // ← synced via Firestore
           createdAt:   serverTimestamp(),
           ...createCard(),
         });
