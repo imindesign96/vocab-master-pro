@@ -24,19 +24,38 @@ export default function AnkiApp() {
     localStorage.setItem('flashanki_new_per_day', v);
   }, []);
 
-  const [decks, setDecks] = useState([]);
-  const [cards, setCards] = useState([]);
+  // Load from localStorage cache instantly (before Firestore responds)
+  const [decks, setDecks] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('flashanki_decks_cache') || '[]'); } catch { return []; }
+  });
+  const [cards, setCards] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('flashanki_cards_cache') || '[]'); } catch { return []; }
+  });
 
   // Auth
   useEffect(() => onAuthStateChanged(auth, u => { setUser(u); setAuthLoading(false); }), []);
   const signIn = () => signInWithPopup(auth, new GoogleAuthProvider());
-  const handleSignOut = () => signOut(auth);
+  const handleSignOut = () => {
+    signOut(auth);
+    localStorage.removeItem('flashanki_decks_cache');
+    localStorage.removeItem('flashanki_cards_cache');
+  };
 
-  // Real-time Firestore
+  // Real-time Firestore — update state + write-through to localStorage cache
   useEffect(() => {
     if (!user) { setDecks([]); setCards([]); return; }
-    const unsubDecks = subscribeToDecks(user.uid, setDecks);
-    const unsubCards = subscribeToCards(user.uid, null, setCards);
+    const unsubDecks = subscribeToDecks(user.uid, (d) => {
+      setDecks(d);
+      try { localStorage.setItem('flashanki_decks_cache', JSON.stringify(d)); } catch {}
+    });
+    const unsubCards = subscribeToCards(user.uid, null, (c) => {
+      setCards(c);
+      try {
+        // Strip large media fields before caching (keep doc small)
+        const slim = c.map(({ audioWord, imageData, ...rest }) => rest);
+        localStorage.setItem('flashanki_cards_cache', JSON.stringify(slim));
+      } catch {}
+    });
     return () => { unsubDecks(); unsubCards(); };
   }, [user]);
 
