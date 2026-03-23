@@ -1292,3 +1292,97 @@ input, select, textarea { font-family: inherit; color: var(--text); }
 /* ── Deck deleting state ────────────────────────────── */
 .deck-card.deleting { opacity: 0.5; pointer-events: none; }
 .import-phase { font-size: 14px; color: var(--text-muted); margin-bottom: 6px; }
+
+/* ── Session Summary ────────────────────────────────── */
+.summary-screen {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  padding: 32px 24px;
+  gap: 24px;
+  text-align: center;
+  overflow-y: auto;
+}
+
+.summary-hero { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+.summary-emoji { font-size: 64px; line-height: 1; }
+.summary-title { font-size: 26px; font-weight: 700; color: var(--text); }
+.summary-msg   { font-size: 16px; color: var(--text-muted); }
+
+.summary-stats-row {
+  display: flex;
+  gap: 16px;
+  width: 100%;
+  justify-content: center;
+}
+.summary-stat {
+  flex: 1;
+  background: var(--surface);
+  border-radius: var(--radius);
+  padding: 16px 8px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid var(--border);
+}
+.summary-stat.accent { border-color: var(--accent); background: #1e1b4b; }
+.ss-val  { font-size: 24px; font-weight: 700; color: var(--text); }
+.ss-lbl  { font-size: 12px; color: var(--text-muted); font-weight: 500; }
+.summary-stat.accent .ss-val { color: var(--accent2); }
+
+.summary-bar-wrap { width: 100%; }
+.summary-bar {
+  height: 10px;
+  background: var(--surface2);
+  border-radius: 99px;
+  overflow: hidden;
+  margin-bottom: 8px;
+}
+.summary-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent), var(--green));
+  border-radius: 99px;
+  transition: width 0.8s ease;
+}
+.summary-bar-labels {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.summary-btns-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+.sb-chip {
+  padding: 6px 14px;
+  border-radius: 99px;
+  font-size: 13px;
+  font-weight: 500;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.sb-chip strong { font-weight: 700; }
+.sb-again { background: #3f0f0f; color: #fca5a5; }
+.sb-hard  { background: #3f2a0f; color: #fdba74; }
+.sb-good  { background: #0f2e1a; color: #86efac; }
+.sb-easy  { background: #0f1f3f; color: #93c5fd; }
+
+.summary-done-btn {
+  width: 100%;
+  padding: 16px;
+  background: var(--accent);
+  color: #fff;
+  border-radius: var(--radius);
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+}
+.summary-done-btn:active { opacity: 0.85; }

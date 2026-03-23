@@ -73,9 +73,10 @@ export default function ReviewScreen({ cards, uid, onDone, onCardUpdated, newPer
   const [correct, setCorrect]     = useState(false);
   const [attempts, setAttempts]   = useState(0);      // wrong attempts so far
   const [lastWrong, setLastWrong] = useState('');     // last wrong typed value
-  const [stats, setStats]         = useState({ reviewed: 0, rightFirst: 0 });
+  const [stats, setStats]         = useState({ reviewed: 0, rightFirst: 0, again: 0, hard: 0, good: 0, easy: 0 });
   const [media, setMedia]         = useState({});     // IDB media for current card
   const [retrying, setRetrying]   = useState(false);  // true after "Học lại" pressed
+  const startTime                 = useRef(Date.now());
   const MAX_ATTEMPTS = 3;
   const inputRef = useRef(null);
 
@@ -144,7 +145,13 @@ export default function ReviewScreen({ cards, uid, onDone, onCardUpdated, newPer
     onCardUpdated({ ...card, ...updated });
 
     const isRight = quality >= QUALITY.GOOD;
-    setStats(s => ({ reviewed: s.reviewed + 1, rightFirst: s.rightFirst + (isRight ? 1 : 0) }));
+    const qKey = { [QUALITY.AGAIN]: 'again', [QUALITY.HARD]: 'hard', [QUALITY.GOOD]: 'good', [QUALITY.EASY]: 'easy' }[quality];
+    setStats(s => ({
+      ...s,
+      reviewed: s.reviewed + 1,
+      rightFirst: s.rightFirst + (isRight ? 1 : 0),
+      [qKey]: (s[qKey] || 0) + 1,
+    }));
 
     if (quality === QUALITY.AGAIN) {
       queue.current = [...queue.current, { ...card, ...updated }];
@@ -162,20 +169,8 @@ export default function ReviewScreen({ cards, uid, onDone, onCardUpdated, newPer
 
   // ── Session done ─────────────────────────────────────
   if (current >= queue.current.length) {
-    const ret = stats.reviewed > 0
-      ? Math.round((stats.rightFirst / stats.reviewed) * 100) : 0;
-    return (
-      <div className="done-screen">
-        <span className="done-emoji">🎉</span>
-        <h2>Session Complete!</h2>
-        <div className="done-stats">
-          <Bubble n={stats.reviewed} label="Reviewed" />
-          <Bubble n={`${ret}%`} label="Correct" />
-          <Bubble n={stats.rightFirst} label="Right" />
-        </div>
-        <button className="start-btn" onClick={onDone}>← Back to Today</button>
-      </div>
-    );
+    const elapsed = Math.round((Date.now() - startTime.current) / 1000);
+    return <SessionSummary stats={stats} elapsed={elapsed} onDone={onDone} />;
   }
 
   const total    = queue.current.length;
@@ -374,6 +369,66 @@ function AudioBtn({ label, dataUrl, fallback, autoPlay }) {
   );
 }
 
+function SessionSummary({ stats, elapsed, onDone }) {
+  const { reviewed, rightFirst, again, hard, good, easy } = stats;
+  const accuracy = reviewed > 0 ? Math.round((rightFirst / reviewed) * 100) : 0;
+  const mins = Math.floor(elapsed / 60);
+  const secs = elapsed % 60;
+  const timeStr = mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
+
+  const emoji = accuracy >= 90 ? '🏆' : accuracy >= 70 ? '🎉' : accuracy >= 50 ? '💪' : '📖';
+  const msg   = accuracy >= 90 ? 'Xuất sắc!' : accuracy >= 70 ? 'Tốt lắm!' : accuracy >= 50 ? 'Cố lên!' : 'Tiếp tục luyện tập!';
+
+  return (
+    <div className="summary-screen">
+      <div className="summary-hero">
+        <span className="summary-emoji">{emoji}</span>
+        <h2 className="summary-title">Hoàn thành!</h2>
+        <p className="summary-msg">{msg}</p>
+      </div>
+
+      {/* Main stats row */}
+      <div className="summary-stats-row">
+        <div className="summary-stat">
+          <span className="ss-val">{reviewed}</span>
+          <span className="ss-lbl">Thẻ học</span>
+        </div>
+        <div className="summary-stat accent">
+          <span className="ss-val">{accuracy}%</span>
+          <span className="ss-lbl">Chính xác</span>
+        </div>
+        <div className="summary-stat">
+          <span className="ss-val">{timeStr}</span>
+          <span className="ss-lbl">Thời gian</span>
+        </div>
+      </div>
+
+      {/* Accuracy bar */}
+      <div className="summary-bar-wrap">
+        <div className="summary-bar">
+          <div className="summary-bar-fill" style={{ width: `${accuracy}%` }} />
+        </div>
+        <div className="summary-bar-labels">
+          <span>{rightFirst} đúng</span>
+          <span>{reviewed - rightFirst} sai</span>
+        </div>
+      </div>
+
+      {/* Button breakdown */}
+      {reviewed > 0 && (
+        <div className="summary-btns-row">
+          {again > 0 && <div className="sb-chip sb-again">Again <strong>{again}</strong></div>}
+          {hard  > 0 && <div className="sb-chip sb-hard">Hard <strong>{hard}</strong></div>}
+          {good  > 0 && <div className="sb-chip sb-good">Good <strong>{good}</strong></div>}
+          {easy  > 0 && <div className="sb-chip sb-easy">Easy <strong>{easy}</strong></div>}
+        </div>
+      )}
+
+      <button className="summary-done-btn" onClick={onDone}>← Về trang chủ</button>
+    </div>
+  );
+}
+
 function StateBadge({ state }) {
   const colors = { new: '#64748b', learning: '#f97316', review: '#6366f1', relearning: '#ef4444' };
   const labels = { new: 'New', learning: 'Learn', review: 'Review', relearning: 'Relearn' };
@@ -381,11 +436,3 @@ function StateBadge({ state }) {
   return <span className="state-badge" style={{ background: colors[state] }}>{labels[state]}</span>;
 }
 
-function Bubble({ n, label }) {
-  return (
-    <div className="done-bubble">
-      <span className="done-n">{n}</span>
-      <span className="done-lbl">{label}</span>
-    </div>
-  );
-}
